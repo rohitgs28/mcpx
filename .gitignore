@@ -1,0 +1,9 @@
+mcpx
+*.exe
+*.test
+*.out
+coverage.out
+dist/
+vendor/
+.idea/
+.vscode/
