@@ -1,0 +1,53 @@
+# mcpx gateway configuration
+listen: ":8080"
+
+# Backend MCP servers to proxy
+servers:
+  - name: filesystem
+    url: http://localhost:3001
+    transport: http
+    policy:
+      # Only allow read operations
+      allow_tools:
+        - read_file
+        - list_directory
+        - search_files
+      deny_tools:
+        - write_file
+        - delete_file
+
+  - name: database
+    url: http://localhost:3002
+    transport: http
+    policy:
+      # Read-only mode: tools/list works, tools/call is blocked
+      read_only: true
+
+  - name: github
+    url: http://localhost:3003
+    transport: http
+    policy:
+      deny_tools:
+        - delete_repository
+        - delete_branch
+
+# Authentication
+auth:
+  enabled: true
+  type: bearer          # "bearer", "api_key", or "none"
+  token: "your-secret-token-here"
+
+# Audit logging
+audit:
+  enabled: true
+  output: stdout         # "stdout", "file", or "json"
+  # path: /var/log/mcpx/audit.log  # required when output is "file"
+
+# Rate limiting
+rate_limit:
+  enabled: true
+  rps: 100               # global requests per second
+  burst: 20              # burst capacity
+  per_tool: true         # also rate limit per tool name
+  tool_rps: 10           # per-tool requests per second
+  tool_burst: 5          # per-tool burst
