@@ -1,0 +1,56 @@
+# mcpx config for Claude Desktop
+#
+# Claude Desktop connects to MCP servers defined in claude_desktop_config.json.
+# Point Claude Desktop at mcpx instead, and mcpx proxies to your real servers
+# with auth, rate limiting, and policy enforcement.
+#
+# In claude_desktop_config.json, replace your server URL with:
+#   http://localhost:8080/mcp/filesystem
+#
+# This gives you full audit logging and access control over what Claude can do.
+
+listen: ":8080"
+
+servers:
+  # Filesystem server — read-only access
+  - name: filesystem
+    url: http://localhost:3001
+    policy:
+      allow_tools:
+        - read_file
+        - list_directory
+        - search_files
+        - get_file_info
+      deny_tools:
+        - write_file
+        - create_directory
+        - move_file
+        - delete_file
+
+  # GitHub server — block destructive operations
+  - name: github
+    url: http://localhost:3002
+    policy:
+      deny_tools:
+        - delete_repository
+        - delete_branch
+        - delete_file
+        - force_push
+
+# No auth needed for local Claude Desktop connections
+auth:
+  enabled: false
+
+# Log everything Claude does for review
+audit:
+  enabled: true
+  output: stdout
+
+# Prevent runaway tool calls
+rate_limit:
+  enabled: true
+  rps: 30
+  burst: 10
+  per_tool: true
+  tool_rps: 5
+  tool_burst: 3

@@ -1,54 +1,59 @@
-<p align="center">
-  <h1 align="center">mcpx</h1>
-  <p align="center">
-    <strong>A lightweight gateway proxy for the Model Context Protocol.</strong>
-  </p>
-  <p align="center">
-    <a href="https://github.com/rohitgs28/mcpx/actions"><img src="https://github.com/rohitgs28/mcpx/workflows/CI/badge.svg" alt="CI"></a>
-    <a href="https://github.com/rohitgs28/mcpx/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
-    <a href="https://github.com/rohitgs28/mcpx"><img src="https://img.shields.io/badge/built_with-Go-00ADD8.svg" alt="Built with Go"></a>
-  </p>
-</p>
+# mcpx
+
+**Secure your MCP servers in 5 minutes. One binary. One config file. Zero dependencies.**
+
+[![CI](https://github.com/rohitgs28/mcpx/workflows/CI/badge.svg)](https://github.com/rohitgs28/mcpx/actions)
+[![Go Report Card](https://goreportcard.com/badge/github.com/rohitgs28/mcpx)](https://goreportcard.com/report/github.com/rohitgs28/mcpx)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Built with Go](https://img.shields.io/badge/built_with-Go-00ADD8.svg)](https://go.dev)
 
 ---
 
-mcpx sits between MCP clients and MCP servers. It adds authentication, rate limiting, tool-level access control, and audit logging without modifying your existing MCP servers.
+mcpx is a lightweight gateway proxy for [Model Context Protocol](https://modelcontextprotocol.io/) servers. It sits between your MCP clients (Claude, Cursor, VS Code, custom agents) and your MCP servers, adding authentication, rate limiting, tool-level access control, and audit logging — without modifying your existing servers.
 
 ```
 MCP Client (Claude, Cursor, etc.)
-      |
-      v
+      │
+      ▼
   ┌────────┐
-  │  mcpx  │  auth, rate limit, policy, audit
+  │  mcpx  │  auth · rate limit · policy · audit · metrics
   └────────┘
-      |
+      │
   ┌───┴────────┐
-  v            v
+  ▼            ▼
 Server A    Server B
 (filesystem)  (database)
 ```
 
-## The Problem
+## Why mcpx?
 
-MCP servers are powerful but have no built-in access control. Any connected client can call any tool with any arguments. In production, you need:
+MCP servers are powerful but have **no built-in access control**. Any connected client can call any tool with any arguments. In production, you need auth, rate limiting, policies, and audit trails.
 
-- Authentication before clients can reach your servers
-- Rate limiting to prevent abuse and manage API costs
-- Tool-level policies (allow read_file but block delete_file)
-- Audit trails for compliance and debugging
-- A single entry point instead of exposing every server directly
+Most MCP gateway solutions require Kubernetes clusters, Docker Desktop, or full API gateway stacks. **mcpx doesn't.** It's a single binary with a single YAML config file.
 
-mcpx solves all of these with a single config file.
+| | mcpx | Microsoft MCP Gateway | Docker MCP Gateway | Kong AI MCP Proxy |
+|---|---|---|---|---|
+| **Setup time** | 5 minutes | Hours (K8s required) | Docker Desktop | Kong cluster |
+| **Dependencies** | None | Kubernetes, Azure | Docker | Kong, Lua runtime |
+| **Config** | One YAML file | CRDs + Helm charts | UI + profiles | kong.yaml + plugins |
+| **Binary size** | ~10 MB | Cluster | Docker image | Full gateway |
+| **Target users** | Devs & small teams | Enterprise Azure | Docker users | Existing Kong users |
+| **Prometheus metrics** | ✅ Built-in | Via adapter | Via Docker | Via plugin |
+| **Deep health checks** | ✅ Per-backend | ❌ | ❌ | Via plugin |
+| **License** | MIT | MIT | Apache 2.0 | Apache 2.0 |
 
 ## Quick Start
 
 ```bash
-# Build from source
+# Install from source
 git clone https://github.com/rohitgs28/mcpx
 cd mcpx
 go build -o mcpx ./cmd/mcpx
 
-# Run with example config
+# Or install directly
+go install github.com/rohitgs28/mcpx/cmd/mcpx@latest
+
+# Run with config
 ./mcpx -c mcpx.yaml
 ```
 
@@ -58,7 +63,7 @@ docker build -t mcpx .
 docker run -p 8080:8080 -v $(pwd)/mcpx.yaml:/etc/mcpx/mcpx.yaml mcpx
 ```
 
-The gateway starts on `:8080`. MCP clients connect to `http://localhost:8080/mcp/{server_name}` instead of directly to the backend server.
+The gateway starts on `:8080`. Point your MCP clients to `http://localhost:8080/mcp/{server_name}` instead of directly to your backend servers.
 
 ## Configuration
 
@@ -79,7 +84,7 @@ servers:
   - name: database
     url: http://localhost:3002
     policy:
-      read_only: true  # blocks all tools/call, allows tools/list
+      read_only: true  # blocks tools/call, allows tools/list
 
 auth:
   enabled: true
@@ -101,57 +106,104 @@ rate_limit:
 
 ## Features
 
-### Authentication
-Supports bearer token and API key authentication. Requests without valid credentials are rejected before reaching any backend server.
+### 🔐 Authentication
 
-### Tool-Level Access Control
-Define allow and deny lists per server. Use read-only mode to let clients discover available tools without being able to call them. Deny lists take precedence over allow lists.
+Bearer token and API key authentication. Requests without valid credentials are rejected before reaching any backend. OAuth 2.1 support is on the [roadmap](ROADMAP.md).
 
-### Rate Limiting
-Global rate limiting protects all backends. Per-tool rate limiting prevents abuse of expensive or sensitive tools. Uses token bucket algorithm with configurable burst capacity.
+### 🛡️ Tool-Level Access Control
 
-### Audit Logging
-Every request is logged with server name, method, tool name, client IP, policy decision, and latency. Output to stdout for piping to your existing log infrastructure, or write directly to a file.
+Define allow and deny lists per server. Use `read_only: true` to let clients discover tools without calling them. Deny lists take precedence.
 
-### Multi-Server Routing
-Register multiple MCP servers behind a single gateway. Clients address servers by name: `/mcp/filesystem`, `/mcp/database`, `/mcp/github`.
+```yaml
+policy:
+  allow_tools: [read_file, list_directory]
+  deny_tools: [write_file, delete_file]
+```
+
+### ⏱️ Rate Limiting
+
+Global rate limiting protects all backends. Per-tool rate limiting prevents abuse of expensive operations. Token bucket algorithm with configurable burst.
+
+### 📊 Prometheus Metrics
+
+Built-in `/metrics` endpoint exposes request counts, latencies, tool usage, policy decisions, auth failures, and rate limit hits. Plug into Grafana, Datadog, or any Prometheus-compatible system.
+
+```
+mcpx_requests_total{server="filesystem",method="tools/call",status_code="2xx"} 42
+mcpx_tool_calls_total{server="filesystem",tool="read_file",decision="allow"} 38
+mcpx_request_duration_ms_bucket{server="filesystem",le="50"} 35
+mcpx_auth_failures_total 3
+mcpx_rate_limit_hits_total 1
+```
+
+### 🏥 Deep Health Checks
+
+`/health` probes each backend server and reports individual status, latency, and policy configuration. Returns `degraded` when some backends are down, `unhealthy` when all are down.
+
+```json
+{
+  "status": "degraded",
+  "servers": [
+    {"name": "filesystem", "healthy": true, "latency_ms": 2.1},
+    {"name": "database", "healthy": false, "error": "unreachable: connection refused"}
+  ]
+}
+```
+
+### 📝 Audit Logging
+
+Every request is logged with server name, method, tool name, client IP, policy decision, and latency. JSON output for your existing log infrastructure.
+
+### 🌐 CORS Support
+
+Browser-based MCP clients can connect through the gateway with configurable CORS headers.
+
+### 🔀 Multi-Server Routing
+
+Register multiple MCP servers behind a single gateway. Clients address them by name: `/mcp/filesystem`, `/mcp/database`, `/mcp/github`.
 
 ## API
 
 | Endpoint | Description |
-|----------|-------------|
-| `POST /mcp/{server}` | Proxy MCP requests to the named backend |
-| `GET /health` | Health check with server count |
+|---|---|
+| `POST /mcp/{server}` | Proxy MCP JSON-RPC requests to the named backend |
+| `GET /health` | Deep health check with per-backend status |
 | `GET /servers` | List all registered backend servers |
+| `GET /metrics` | Prometheus metrics |
 
 ## Architecture
 
 ```
-cmd/mcpx/main.go         CLI entrypoint, middleware chain assembly
+cmd/mcpx/main.go              CLI entrypoint, middleware chain assembly
 internal/
-├── config/config.go      YAML config loading and validation
-├── mcp/message.go        MCP JSON-RPC message types and parsing
-├── proxy/proxy.go        Core reverse proxy with request inspection
-├── auth/auth.go          Bearer token and API key middleware
-├── ratelimit/ratelimit.go  Global and per-tool rate limiting
-├── audit/audit.go        Structured audit logging (slog + JSON)
-└── policy/policy.go      Tool-level allow/deny policy engine
+├── config/config.go           YAML config loading and validation
+├── mcp/message.go             MCP JSON-RPC message types and parsing
+├── proxy/proxy.go             Core reverse proxy with request inspection
+├── auth/auth.go               Bearer token and API key middleware
+├── ratelimit/ratelimit.go     Global and per-tool rate limiting
+├── audit/audit.go             Structured audit logging (slog + JSON)
+├── policy/policy.go           Tool-level allow/deny policy engine
+├── metrics/metrics.go         Prometheus-compatible metrics (zero deps)
+├── health/health.go           Deep health checking with backend probes
+└── cors/cors.go               CORS middleware for browser clients
 ```
 
-The middleware chain is: **Auth -> Rate Limit -> Policy -> Proxy -> Backend**.
+**Middleware chain:** Auth → Rate Limit → Policy → Audit → Proxy → Backend
 
-Every request is inspected at the MCP protocol level. The gateway parses JSON-RPC messages to extract the method name and tool name, then evaluates the policy before forwarding.
+Every request is inspected at the MCP protocol level. The gateway parses JSON-RPC messages to extract the method and tool name, then evaluates the policy before forwarding.
 
 ## Roadmap
 
-- [ ] WebSocket/SSE support for streaming MCP transports
-- [ ] OAuth 2.1 authentication (aligned with MCP spec)
-- [ ] Stdio transport support (spawn and manage local MCP servers)
-- [ ] Web dashboard for real-time request monitoring
-- [ ] OpenTelemetry tracing integration
-- [ ] Plugin system for custom middleware
-- [ ] Multi-tenant support with per-client policies
-- [ ] Prometheus metrics endpoint
+See [ROADMAP.md](ROADMAP.md) for the full plan. Key upcoming work:
+
+- [ ] SSE/WebSocket transport proxying
+- [ ] OAuth 2.1 authentication
+- [ ] Stdio transport (spawn local MCP servers)
+- [ ] OpenTelemetry tracing
+- [ ] Hot config reload
+- [ ] Web dashboard
+- [ ] Plugin system (Go + WASM)
+- [ ] Helm chart
 
 ## Contributing
 
@@ -159,8 +211,8 @@ Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instruct
 
 ```bash
 go test ./...       # run tests
-go vet ./...        # vet
-golangci-lint run   # lint
+go vet ./...        # lint
+golangci-lint run   # extended lint
 ```
 
 ## License

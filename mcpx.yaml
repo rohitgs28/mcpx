@@ -1,4 +1,6 @@
 # mcpx gateway configuration
+# Full documentation: https://github.com/rohitgs28/mcpx
+
 listen: ":8080"
 
 # Backend MCP servers to proxy
@@ -34,20 +36,36 @@ servers:
 # Authentication
 auth:
   enabled: true
-  type: bearer          # "bearer", "api_key", or "none"
+  type: bearer       # "bearer", "api_key", or "none"
   token: "your-secret-token-here"
+
+# CORS — required for browser-based MCP clients
+cors:
+  enabled: true
+  allowed_origins:
+    - "*"             # or list specific origins
+  allowed_methods:
+    - GET
+    - POST
+    - OPTIONS
+  allowed_headers:
+    - Content-Type
+    - Authorization
+    - X-API-Key
+    - Mcp-Session-Id
+  max_age: "86400"
 
 # Audit logging
 audit:
   enabled: true
-  output: stdout         # "stdout", "file", or "json"
+  output: stdout      # "stdout", "file", or "json"
   # path: /var/log/mcpx/audit.log  # required when output is "file"
 
 # Rate limiting
 rate_limit:
   enabled: true
-  rps: 100               # global requests per second
-  burst: 20              # burst capacity
-  per_tool: true         # also rate limit per tool name
-  tool_rps: 10           # per-tool requests per second
-  tool_burst: 5          # per-tool burst
+  rps: 100            # global requests per second
+  burst: 20           # burst capacity
+  per_tool: true      # also rate limit per tool name
+  tool_rps: 10        # per-tool requests per second
+  tool_burst: 5       # per-tool burst

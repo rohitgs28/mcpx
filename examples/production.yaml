@@ -1,0 +1,81 @@
+# mcpx production config — multiple servers with full security
+#
+# This config demonstrates a production-ready setup with:
+# - Multiple backend MCP servers
+# - Bearer token authentication
+# - Strict tool-level policies per server
+# - Rate limiting to control costs
+# - Full audit logging to file
+# - CORS for web-based AI clients
+
+listen: ":8080"
+
+servers:
+  # Read-only filesystem access
+  - name: filesystem
+    url: http://mcp-filesystem:3001
+    policy:
+      allow_tools:
+        - read_file
+        - list_directory
+        - search_files
+
+  # Database — discovery only, no queries
+  - name: database
+    url: http://mcp-database:3002
+    policy:
+      read_only: true
+
+  # Slack — allow posting, block admin operations
+  - name: slack
+    url: http://mcp-slack:3003
+    policy:
+      allow_tools:
+        - send_message
+        - list_channels
+        - search_messages
+      deny_tools:
+        - delete_channel
+        - remove_user
+        - admin_settings
+
+  # GitHub — code review operations only
+  - name: github
+    url: http://mcp-github:3004
+    policy:
+      allow_tools:
+        - get_pull_request
+        - list_pull_requests
+        - create_review
+        - get_file_contents
+        - search_code
+      deny_tools:
+        - delete_repository
+        - delete_branch
+        - force_push
+        - update_branch_protection
+
+auth:
+  enabled: true
+  type: bearer
+  token: "${MCPX_AUTH_TOKEN}"  # set via environment variable
+
+cors:
+  enabled: true
+  allowed_origins:
+    - "https://app.yourcompany.com"
+    - "https://internal.yourcompany.com"
+  max_age: "3600"
+
+audit:
+  enabled: true
+  output: file
+  path: /var/log/mcpx/audit.log
+
+rate_limit:
+  enabled: true
+  rps: 100
+  burst: 20
+  per_tool: true
+  tool_rps: 10
+  tool_burst: 5
