@@ -6,7 +6,11 @@
 // Usage:
 //
 //	mcpx -c mcpx.yaml
+//	mcpx -c mcpx.yaml -watch          # hot-reload on file change
+//	mcpx -c mcpx.yaml -watch-interval 5s
 //	mcpx --version
+//
+// Send SIGHUP to the running process to force a reload at any time.
 package main
 
 import (
@@ -17,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -38,6 +43,8 @@ func main() {
 	configPath := flag.String("c", "mcpx.yaml", "path to config file")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.BoolVar(showVersion, "v", false, "print version and exit (shorthand)")
+	watchFlag := flag.Bool("watch", false, "watch config file and hot-reload on change")
+	watchInterval := flag.Duration("watch-interval", 2*time.Second, "config file poll interval when -watch is set")
 	flag.Parse()
 
 	if *showVersion {
@@ -52,8 +59,117 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize metrics collector
+	// Metrics collector persists across reloads so counters are not reset.
 	mc := metrics.New()
+
+	// Build the initial handler and wrap it in a reloadable shell.
+	// On reload, we atomically swap the inner handler — new requests see
+	// the new config, in-flight requests finish against the old one.
+	initialHandler := buildHandler(cfg, mc)
+	reloadable := newReloadableHandler(initialHandler)
+
+	// Build HTTP server against the reloadable wrapper. The listen address
+	// is captured from the initial config; changing it requires a restart.
+	srv := &http.Server{
+		Addr:         cfg.Listen,
+		Handler:      reloadable,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	initialListen := cfg.Listen
+
+	// reload applies a freshly loaded config by rebuilding the handler
+	// chain and atomically swapping it. It never mutates srv.Addr.
+	reload := func(newCfg *config.Config) {
+		if newCfg.Listen != initialListen {
+			slog.Warn("listen address change requires restart; ignoring",
+				"current", initialListen, "new", newCfg.Listen)
+		}
+		h := buildHandler(newCfg, mc)
+		reloadable.swap(h)
+		slog.Info("config reloaded",
+			"servers", len(newCfg.Servers),
+			"auth", newCfg.Auth != nil && newCfg.Auth.Enabled,
+			"rate_limit", newCfg.RateLimit != nil && newCfg.RateLimit.Enabled,
+			"audit", newCfg.Audit != nil && newCfg.Audit.Enabled,
+		)
+	}
+
+	// Signals: SIGINT/SIGTERM = shutdown, SIGHUP = reload.
+	shutdownCh := make(chan os.Signal, 1)
+	signal.Notify(shutdownCh, os.Interrupt, syscall.SIGTERM)
+
+	hupCh := make(chan os.Signal, 1)
+	signal.Notify(hupCh, syscall.SIGHUP)
+
+	watchCtx, stopWatch := context.WithCancel(context.Background())
+	defer stopWatch()
+
+	// SIGHUP handler — always on, no flag needed.
+	go func() {
+		for range hupCh {
+			slog.Info("SIGHUP received, reloading config", "path", *configPath)
+			newCfg, err := config.Load(*configPath)
+			if err != nil {
+				slog.Error("reload failed, keeping previous config", "error", err)
+				continue
+			}
+			reload(newCfg)
+		}
+	}()
+
+	// Optional file-watch reload (opt-in via -watch).
+	if *watchFlag {
+		go config.Watch(watchCtx, *configPath, *watchInterval,
+			func(c *config.Config) error {
+				reload(c)
+				return nil
+			},
+			func(err error) {
+				slog.Error("config watch reload failed, keeping previous config", "error", err)
+			},
+		)
+	}
+
+	go func() {
+		slog.Info("mcpx gateway starting",
+			"version", version,
+			"listen", cfg.Listen,
+			"servers", len(cfg.Servers),
+			"auth", cfg.Auth != nil && cfg.Auth.Enabled,
+			"rate_limit", cfg.RateLimit != nil && cfg.RateLimit.Enabled,
+			"audit", cfg.Audit != nil && cfg.Audit.Enabled,
+			"watch", *watchFlag,
+		)
+
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("server failed", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	<-shutdownCh
+	slog.Info("shutting down gracefully...")
+	stopWatch()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		slog.Error("shutdown error", "error", err)
+	}
+
+	slog.Info("mcpx stopped")
+}
+
+// buildHandler constructs the full mux (MCP routes + health + metrics +
+// servers listing) wrapped in the middleware chain derived from cfg.
+// It is called once at startup and again on every hot-reload.
+//
+// The metrics collector is passed in so that counters survive reloads.
+func buildHandler(cfg *config.Config, mc *metrics.Collector) http.Handler {
 	mc.SetServersRegistered(int64(len(cfg.Servers)))
 
 	// Build health checker with server info
@@ -80,28 +196,22 @@ func main() {
 	// Assemble middleware chain: CORS -> Auth -> Rate Limit -> Policy -> Audit -> Proxy
 	var handler http.Handler = proxyHandler
 
-	// Audit logging (innermost wrapping, closest to proxy)
 	if cfg.Audit != nil && cfg.Audit.Enabled {
 		handler = audit.Middleware(cfg.Audit, handler)
 	}
 
-	// Policy enforcement
 	handler = policy.Middleware(cfg, handler)
 
-	// Rate limiting
 	if cfg.RateLimit != nil && cfg.RateLimit.Enabled {
 		handler = ratelimit.Middleware(cfg.RateLimit, mc, handler)
 	}
 
-	// Authentication
 	if cfg.Auth != nil && cfg.Auth.Enabled {
 		handler = auth.Middleware(cfg.Auth, mc, handler)
 	}
 
-	// Metrics tracking (wraps everything to capture full request lifecycle)
 	handler = metricsMiddleware(mc, handler)
 
-	// CORS (outermost, so preflight is handled before auth)
 	if cfg.CORS != nil && cfg.CORS.Enabled {
 		corsCfg := cors.Config{
 			AllowedOrigins: cfg.CORS.AllowedOrigins,
@@ -111,67 +221,41 @@ func main() {
 		}
 		handler = cors.Middleware(corsCfg, handler)
 	} else {
-		// Default CORS for convenience
 		handler = cors.Middleware(cors.DefaultConfig(), handler)
 	}
 
-	// Set up routes
 	mux := http.NewServeMux()
-
-	// MCP proxy routes
 	mux.Handle("/mcp/", handler)
-
-	// Health check — deep health with backend probing
 	mux.HandleFunc("/health", checker.Handler())
-
-	// Server listing
 	mux.HandleFunc("/servers", func(w http.ResponseWriter, r *http.Request) {
 		serversHandler(w, r, cfg)
 	})
-
-	// Prometheus metrics
 	mux.HandleFunc("/metrics", mc.Handler())
 
-	// Build HTTP server
-	srv := &http.Server{
-		Addr:         cfg.Listen,
-		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
-		IdleTimeout:  120 * time.Second,
-	}
+	return mux
+}
 
-	// Graceful shutdown
-	done := make(chan os.Signal, 1)
-	signal.Notify(done, os.Interrupt, syscall.SIGTERM)
+// reloadableHandler is an http.Handler that forwards every request to
+// an atomically-swappable inner handler. New requests see the new
+// handler the instant swap() returns; in-flight requests finish against
+// whichever handler they started with.
+type reloadableHandler struct {
+	current atomic.Pointer[http.Handler]
+}
 
-	go func() {
-		slog.Info("mcpx gateway starting",
-			"version", version,
-			"listen", cfg.Listen,
-			"servers", len(cfg.Servers),
-			"auth", cfg.Auth != nil && cfg.Auth.Enabled,
-			"rate_limit", cfg.RateLimit != nil && cfg.RateLimit.Enabled,
-			"audit", cfg.Audit != nil && cfg.Audit.Enabled,
-		)
+func newReloadableHandler(h http.Handler) *reloadableHandler {
+	r := &reloadableHandler{}
+	r.current.Store(&h)
+	return r
+}
 
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("server failed", "error", err)
-			os.Exit(1)
-		}
-	}()
+func (r *reloadableHandler) swap(h http.Handler) {
+	r.current.Store(&h)
+}
 
-	<-done
-	slog.Info("shutting down gracefully...")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	if err := srv.Shutdown(ctx); err != nil {
-		slog.Error("shutdown error", "error", err)
-	}
-
-	slog.Info("mcpx stopped")
+func (r *reloadableHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	h := *r.current.Load()
+	h.ServeHTTP(w, req)
 }
 
 // metricsMiddleware wraps a handler to track request count, latency, and active connections.
@@ -185,9 +269,8 @@ func metricsMiddleware(mc *metrics.Collector, next http.Handler) http.Handler {
 
 		next.ServeHTTP(rw, r)
 
-		// Extract server name from path: /mcp/{server}
 		server := extractServerName(r.URL.Path)
-		method := r.Header.Get("X-MCP-Method") // set by proxy after parsing
+		method := r.Header.Get("X-MCP-Method")
 		if method == "" {
 			method = r.Method
 		}
@@ -209,7 +292,6 @@ func (rw *responseWriter) WriteHeader(code int) {
 
 // extractServerName extracts the server name from /mcp/{server}/...
 func extractServerName(path string) string {
-	// path: /mcp/filesystem or /mcp/filesystem/extra
 	if len(path) < 5 {
 		return "unknown"
 	}

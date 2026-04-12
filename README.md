@@ -55,7 +55,12 @@ go install github.com/rohitgs28/mcpx/cmd/mcpx@latest
 
 # Run with config
 ./mcpx -c mcpx.yaml
+
+# Hot-reload the config file on every change
+./mcpx -c mcpx.yaml -watch
 ```
+
+Send `SIGHUP` to force a reload at any time (`kill -HUP $(pidof mcpx)`). Reloads rebuild the handler chain atomically: in-flight requests finish against the old config, new ones see the new config. Invalid configs are rejected and the previous config keeps running.
 
 ```bash
 # Or use Docker

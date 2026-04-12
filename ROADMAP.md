@@ -52,7 +52,7 @@ Make mcpx the simplest, fastest way to secure MCP servers in production. One bin
 
 - [ ] OpenTelemetry tracing integration
 - [ ] Prometheus metrics with Grafana dashboard template
-- [ ] Hot config reload (SIGHUP or watch mode)
+- [x] Hot config reload (SIGHUP or watch mode)
 - [ ] Graceful shutdown with connection draining
 - [ ] Circuit breaker per backend
 - [ ] Request/response caching for idempotent tools
