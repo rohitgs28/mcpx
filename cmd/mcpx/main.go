@@ -216,7 +216,7 @@ func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store
 		al, _ = audit.New(config.AuditConfig{})
 	}
 
-	gw, err := proxy.New(cfg, pe, al, ts)
+	gw, err := proxy.New(cfg, pe, al, ts, mc)
 	if err != nil {
 		slog.Error("failed to build gateway, serving 503 on /mcp/", "error", err)
 	}
@@ -311,6 +311,15 @@ func metricsMiddleware(mc *metrics.Collector, next http.Handler) http.Handler {
 		}
 
 		mc.RecordRequest(server, method, rw.statusCode, time.Since(start))
+
+		// Auth and rate-limit middleware are the only sources of these status
+		// codes in the chain, so the response status tells us which fired.
+		switch rw.statusCode {
+		case http.StatusUnauthorized:
+			mc.RecordAuthFailure()
+		case http.StatusTooManyRequests:
+			mc.RecordRateLimitHit()
+		}
 	})
 }
 

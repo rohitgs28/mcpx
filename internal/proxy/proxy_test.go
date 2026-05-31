@@ -11,6 +11,7 @@ import (
 	"github.com/rohitgs28/mcpx/internal/config"
 	"github.com/rohitgs28/mcpx/internal/integrity"
 	"github.com/rohitgs28/mcpx/internal/mcp"
+	"github.com/rohitgs28/mcpx/internal/metrics"
 	"github.com/rohitgs28/mcpx/internal/policy"
 	"github.com/rohitgs28/mcpx/internal/proxy"
 )
@@ -45,7 +46,7 @@ func newGateway(t *testing.T, url string, pol *config.Policy, insp *config.Inspe
 	if err != nil {
 		t.Fatalf("audit.New: %v", err)
 	}
-	gw, err := proxy.New(cfg, policy.New(cfg.Servers), al, integrity.NewStore(mode))
+	gw, err := proxy.New(cfg, policy.New(cfg.Servers), al, integrity.NewStore(mode), metrics.New())
 	if err != nil {
 		t.Fatalf("proxy.New: %v", err)
 	}
@@ -173,6 +174,29 @@ func TestGateway_DeniedToolCallBlocked(t *testing.T) {
 	gw.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("expected 403 for tools/call on read-only server, got %d", rec.Code)
+	}
+}
+
+func TestGateway_RecordsToolCallMetric(t *testing.T) {
+	body := toolsList("read_file")
+	up := upstream(t, &body)
+	cfg := &config.Config{
+		Servers: []config.ServerConfig{{Name: "up", URL: up.URL, Transport: "http"}},
+	}
+	al, _ := audit.New(config.AuditConfig{})
+	mc := metrics.New()
+	gw, err := proxy.New(cfg, policy.New(cfg.Servers), al, integrity.NewStore(integrity.ModeOff), mc)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp/up/", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file"}}`))
+	gw.ServeHTTP(httptest.NewRecorder(), req)
+
+	mrec := httptest.NewRecorder()
+	mc.Handler()(mrec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if out := mrec.Body.String(); !strings.Contains(out, "read_file") {
+		t.Errorf("expected tool-call metric for read_file to be recorded, metrics:\n%s", out)
 	}
 }
 

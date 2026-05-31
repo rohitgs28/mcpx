@@ -13,12 +13,12 @@ import (
 
 // Config is the top-level gateway configuration.
 type Config struct {
-	Listen    string          `yaml:"listen"`
-	Servers   []ServerConfig  `yaml:"servers"`
-	Auth      *AuthConfig     `yaml:"auth"`
-	Audit     *AuditConfig    `yaml:"audit"`
-	RateLimit *RateLimitConfig `yaml:"rate_limit"`
-	CORS      *CORSConfig     `yaml:"cors"`
+	Listen     string            `yaml:"listen"`
+	Servers    []ServerConfig    `yaml:"servers"`
+	Auth       *AuthConfig       `yaml:"auth"`
+	Audit      *AuditConfig      `yaml:"audit"`
+	RateLimit  *RateLimitConfig  `yaml:"rate_limit"`
+	CORS       *CORSConfig       `yaml:"cors"`
 	Inspection *InspectionConfig `yaml:"inspection"`
 }
 
@@ -34,10 +34,10 @@ type InspectionConfig struct {
 
 // ServerConfig defines a backend MCP server.
 type ServerConfig struct {
-	Name      string        `yaml:"name"`
-	URL       string        `yaml:"url"`
-	Transport string        `yaml:"transport"` // "http", "sse", "websocket"
-	Policy    *Policy       `yaml:"policy"`
+	Name      string  `yaml:"name"`
+	URL       string  `yaml:"url"`
+	Transport string  `yaml:"transport"` // "http", "sse", "websocket"
+	Policy    *Policy `yaml:"policy"`
 }
 
 // Policy defines tool-level access control for a server.
@@ -49,11 +49,11 @@ type Policy struct {
 
 // AuthConfig defines authentication settings.
 type AuthConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Type    string `yaml:"type"`  // "bearer", "api_key", "none", "oauth"
-	Token   string `yaml:"token"` // for bearer auth
-	Header  string `yaml:"header"` // for api_key auth (default: X-API-Key)
-	OAuth   *OAuthConfig `yaml:"oauth"` // for oauth (OAuth 2.1 resource server)
+	Enabled bool         `yaml:"enabled"`
+	Type    string       `yaml:"type"`   // "bearer", "api_key", "none", "oauth"
+	Token   string       `yaml:"token"`  // for bearer auth
+	Header  string       `yaml:"header"` // for api_key auth (default: X-API-Key)
+	OAuth   *OAuthConfig `yaml:"oauth"`  // for oauth (OAuth 2.1 resource server)
 }
 
 // OAuthConfig configures the gateway as an OAuth 2.1 protected resource server,
@@ -84,12 +84,12 @@ type AuditConfig struct {
 
 // RateLimitConfig defines rate limiting settings.
 type RateLimitConfig struct {
-	Enabled  bool    `yaml:"enabled"`
-	RPS      float64 `yaml:"rps"`
-	Burst    int     `yaml:"burst"`
-	PerTool  bool    `yaml:"per_tool"`
-	ToolRPS  float64 `yaml:"tool_rps"`
-	ToolBurst int    `yaml:"tool_burst"`
+	Enabled   bool    `yaml:"enabled"`
+	RPS       float64 `yaml:"rps"`
+	Burst     int     `yaml:"burst"`
+	PerTool   bool    `yaml:"per_tool"`
+	ToolRPS   float64 `yaml:"tool_rps"`
+	ToolBurst int     `yaml:"tool_burst"`
 }
 
 // CORSConfig defines CORS settings for browser-based MCP clients.

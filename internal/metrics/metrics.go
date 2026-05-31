@@ -20,16 +20,16 @@ type Collector struct {
 	mu sync.RWMutex
 
 	// Counters
-	requestsTotal    map[string]*atomic.Int64 // label: server,method,status
-	toolCallsTotal   map[string]*atomic.Int64 // label: server,tool,decision
-	policyDecisions  map[string]*atomic.Int64 // label: server,decision (allow/deny)
-	authFailures     atomic.Int64
-	rateLimitHits    atomic.Int64
+	requestsTotal   map[string]*atomic.Int64 // label: server,method,status
+	toolCallsTotal  map[string]*atomic.Int64 // label: server,tool,decision
+	policyDecisions map[string]*atomic.Int64 // label: server,decision (allow/deny)
+	authFailures    atomic.Int64
+	rateLimitHits   atomic.Int64
 
 	// Histograms (simplified: count + sum for averages, plus buckets)
-	latencySum       map[string]*atomic.Int64 // microseconds, label: server
-	latencyCount     map[string]*atomic.Int64 // label: server
-	latencyBuckets   map[string]map[string]*atomic.Int64 // label: server -> bucket -> count
+	latencySum     map[string]*atomic.Int64            // microseconds, label: server
+	latencyCount   map[string]*atomic.Int64            // label: server
+	latencyBuckets map[string]map[string]*atomic.Int64 // label: server -> bucket -> count
 
 	// Gauges
 	activeConnections atomic.Int64

@@ -18,6 +18,7 @@ import (
 	"github.com/rohitgs28/mcpx/internal/config"
 	"github.com/rohitgs28/mcpx/internal/integrity"
 	"github.com/rohitgs28/mcpx/internal/mcp"
+	"github.com/rohitgs28/mcpx/internal/metrics"
 	"github.com/rohitgs28/mcpx/internal/policy"
 )
 
@@ -26,6 +27,7 @@ type Gateway struct {
 	policy  *policy.Engine
 	audit   *audit.Logger
 	tools   *integrity.Store
+	metrics *metrics.Collector
 	filter  bool // remove policy-denied tools from tools/list responses
 	inspect bool // true when integrity or filtering needs response interception
 	mux     *http.ServeMux
@@ -54,12 +56,13 @@ type reqInfo struct {
 // New builds a gateway. The policy engine and audit logger enforce/record
 // per-request decisions; the integrity store (may be nil) pins tool schemas.
 // Tool-list filtering is enabled via cfg.Inspection.FilterToolsList.
-func New(cfg *config.Config, pe *policy.Engine, al *audit.Logger, ts *integrity.Store) (*Gateway, error) {
+func New(cfg *config.Config, pe *policy.Engine, al *audit.Logger, ts *integrity.Store, mc *metrics.Collector) (*Gateway, error) {
 	g := &Gateway{
 		servers: make(map[string]*Backend),
 		policy:  pe,
 		audit:   al,
 		tools:   ts,
+		metrics: mc,
 		mux:     http.NewServeMux(),
 	}
 	if cfg.Inspection != nil {
@@ -113,6 +116,15 @@ func New(cfg *config.Config, pe *policy.Engine, al *audit.Logger, ts *integrity.
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) { g.mux.ServeHTTP(w, r) }
 
+// recordToolCall records a tools/call policy decision. It is a no-op for
+// non-tool requests (empty tool) and when no metrics collector is configured.
+func (g *Gateway) recordToolCall(server, tool, decision string) {
+	if g.metrics == nil || tool == "" {
+		return
+	}
+	g.metrics.RecordToolCall(server, tool, decision)
+}
+
 func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	path := strings.TrimPrefix(r.URL.Path, "/mcp/")
@@ -143,12 +155,14 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 			entry.StatusCode = http.StatusForbidden
 			entry.DurationMs = time.Since(start).Milliseconds()
 			g.audit.Log(entry)
+			g.recordToolCall(sn, entry.Tool, "deny")
 			resp := mcp.NewErrorResponse(mreq.ID, -32600, result.Reason)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
+		g.recordToolCall(sn, entry.Tool, "allow")
 		// Thread routing details into ModifyResponse for tools/list inspection.
 		if g.inspect {
 			r = r.WithContext(context.WithValue(r.Context(), ctxKeyReqInfo, &reqInfo{server: sn, method: mreq.Method}))

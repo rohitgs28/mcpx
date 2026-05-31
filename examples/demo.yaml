@@ -1,0 +1,27 @@
+# Demo config — pairs with the bundled mock MCP server (examples/mock-mcp).
+#
+#   1. go run ./examples/mock-mcp                     # terminal 1 (listens on :3001)
+#   2. go run ./cmd/mcpx -c examples/demo.yaml        # terminal 2 (gateway on :8080)
+#   3. curl -s localhost:8080/mcp/demo -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq
+#
+# Auth is off so the quickstart curl works with no token. The mock advertises
+# echo, read_file, and dangerous_delete — the policy below denies the last one,
+# and filter_tools_list hides it from tools/list, so you will only see two tools.
+
+listen: ":8080"
+
+servers:
+  - name: demo
+    url: http://localhost:3001
+    transport: http
+    policy:
+      deny_tools:
+        - dangerous_delete
+
+audit:
+  enabled: true
+  output: stdout
+
+inspection:
+  tool_integrity: warn      # logs an audit event if the mock changes a tool schema
+  filter_tools_list: true   # hides dangerous_delete from tools/list

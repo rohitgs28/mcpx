@@ -31,17 +31,24 @@ type Entry struct {
 }
 
 func New(cfg config.AuditConfig) (*Logger, error) {
-	if !cfg.Enabled { return &Logger{enabled: false}, nil }
+	if !cfg.Enabled {
+		return &Logger{enabled: false}, nil
+	}
 	var w io.Writer
 	var closer io.Closer
 	switch cfg.Output {
 	case "file":
-		if cfg.Path == "" { return nil, fmt.Errorf("audit: file output requires a path") }
+		if cfg.Path == "" {
+			return nil, fmt.Errorf("audit: file output requires a path")
+		}
 		f, err := os.OpenFile(cfg.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err != nil { return nil, fmt.Errorf("audit: opening log file: %w", err) }
+		if err != nil {
+			return nil, fmt.Errorf("audit: opening log file: %w", err)
+		}
 		w = f
 		closer = f
-	default: w = os.Stdout
+	default:
+		w = os.Stdout
 	}
 	return &Logger{logger: slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})), enabled: true, closer: closer}, nil
 }
@@ -49,22 +56,37 @@ func New(cfg config.AuditConfig) (*Logger, error) {
 // Close releases the underlying log file, if any. It is safe to call on a
 // disabled logger or one writing to stdout (both are no-ops).
 func (l *Logger) Close() error {
-	if l.closer == nil { return nil }
+	if l.closer == nil {
+		return nil
+	}
 	return l.closer.Close()
 }
 
 func (l *Logger) Log(entry Entry) {
-	if !l.enabled { return }
+	if !l.enabled {
+		return
+	}
 	a := []any{"server", entry.Server, "method", entry.Method, "allowed", entry.Allowed}
-	if entry.Tool != "" { a = append(a, "tool", entry.Tool) }
-	if entry.ClientIP != "" { a = append(a, "client_ip", entry.ClientIP) }
-	if entry.Reason != "" { a = append(a, "reason", entry.Reason) }
-	if entry.DurationMs > 0 { a = append(a, "duration_ms", entry.DurationMs) }
+	if entry.Tool != "" {
+		a = append(a, "tool", entry.Tool)
+	}
+	if entry.ClientIP != "" {
+		a = append(a, "client_ip", entry.ClientIP)
+	}
+	if entry.Reason != "" {
+		a = append(a, "reason", entry.Reason)
+	}
+	if entry.DurationMs > 0 {
+		a = append(a, "duration_ms", entry.DurationMs)
+	}
 	l.logger.Info("mcp.request", a...)
 }
 
 func (l *Logger) LogJSON(entry Entry) {
-	if !l.enabled { return }
+	if !l.enabled {
+		return
+	}
 	entry.Timestamp = time.Now().UTC()
-	data, _ := json.Marshal(entry); fmt.Println(string(data))
+	data, _ := json.Marshal(entry)
+	fmt.Println(string(data))
 }

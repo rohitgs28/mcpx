@@ -70,6 +70,34 @@ docker run -p 8080:8080 -v $(pwd)/mcpx.yaml:/etc/mcpx/mcpx.yaml mcpx
 
 The gateway starts on `:8080`. Point your MCP clients to `http://localhost:8080/mcp/{server_name}` instead of directly to your backend servers.
 
+## Try it in 60 seconds
+
+The repo ships a tiny mock MCP server so you can see the gateway work with no setup.
+
+```bash
+# One command (Docker):
+docker compose up --build
+
+# …or run locally in two terminals:
+go run ./examples/mock-mcp                  # terminal 1 — mock server on :3001
+go run ./cmd/mcpx -c examples/demo.yaml     # terminal 2 — gateway on :8080
+```
+
+Then list the tools through the gateway:
+
+```bash
+curl -s localhost:8080/mcp/demo \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq '.result.tools[].name'
+# "echo"
+# "read_file"          ← dangerous_delete is filtered out by policy
+
+curl -s localhost:8080/mcp/demo \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"dangerous_delete"}}'
+# {"jsonrpc":"2.0",...,"error":{"code":-32600,"message":"tool \"dangerous_delete\" is denied ..."}}  (HTTP 403)
+```
+
+The mock advertises `echo`, `read_file`, and `dangerous_delete`; the demo policy denies the last one, so it's hidden from `tools/list` and blocked on call.
+
 ## Configuration
 
 ```yaml
@@ -235,6 +263,10 @@ internal/
 **Middleware chain:** CORS → Metrics → Auth → Rate Limit → Gateway (Policy → Audit → Proxy)
 
 Every request is inspected at the MCP protocol level. The gateway parses JSON-RPC messages to extract the method and tool name, evaluates the policy before forwarding, and inspects `tools/list` responses for schema integrity and policy filtering on the way back.
+
+## Security
+
+mcpx is explicit about what it defends and what it doesn't. See **[SECURITY.md](SECURITY.md)** for the full threat model — which MCP attacks (rug-pulls, token passthrough, confused deputy, schema poisoning) it mitigates and how, plus the deliberate non-goals (it does **not** do bypassable regex/LLM prompt-injection scanning). Report vulnerabilities via [GitHub Security Advisories](https://github.com/rohitgs28/mcpx/security/advisories/new).
 
 ## Roadmap
 
