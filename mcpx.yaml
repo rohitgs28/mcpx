@@ -69,3 +69,15 @@ rate_limit:
   per_tool: true      # also rate limit per tool name
   tool_rps: 10        # per-tool requests per second
   tool_burst: 5       # per-tool burst
+
+# Response inspection (tools/list)
+inspection:
+  # Pin each tool's full schema on first sighting and react to later changes,
+  # defeating rug-pull/mutation (CVE-2025-54136), shadowing, and schema poisoning.
+  #   off     — disabled
+  #   warn    — log violations to the audit trail, pass the tool through
+  #   enforce — log and drop the mutated tool from tools/list
+  tool_integrity: warn
+  # Strip policy-denied tools from tools/list so clients never see tools they
+  # are not permitted to call.
+  filter_tools_list: true

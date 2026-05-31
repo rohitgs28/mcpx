@@ -60,6 +60,19 @@ auth:
   type: bearer
   token: "${MCPX_AUTH_TOKEN}"  # set via environment variable
 
+  # Or run as an OAuth 2.1 resource server (MCP authorization spec). Tokens are
+  # validated for signature (RS256 via JWKS) and audience (RFC 8707); a token is
+  # rejected unless its aud claim names this gateway. mcpx publishes RFC 9728
+  # Protected Resource Metadata at /.well-known/oauth-protected-resource.
+  #
+  # type: oauth
+  # oauth:
+  #   resource: "https://mcpx.yourcompany.com/mcp"
+  #   jwks_uri: "https://auth.yourcompany.com/.well-known/jwks.json"
+  #   issuer: "https://auth.yourcompany.com"
+  #   authorization_servers:
+  #     - "https://auth.yourcompany.com"
+
 cors:
   enabled: true
   allowed_origins:
@@ -79,3 +92,8 @@ rate_limit:
   per_tool: true
   tool_rps: 10
   tool_burst: 5
+
+# Response inspection: pin tool schemas and filter the advertised tool list.
+inspection:
+  tool_integrity: enforce   # block tools whose schema mutates after first sighting
+  filter_tools_list: true   # hide policy-denied tools from tools/list
