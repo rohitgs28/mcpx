@@ -1,6 +1,6 @@
 # mcpx
 
-**Secure your MCP servers in 5 minutes. One binary. One config file. Zero dependencies.**
+**Secure your MCP servers in 5 minutes. One binary. One config file. No infrastructure to run.**
 
 [![CI](https://github.com/rohitgs28/mcpx/workflows/CI/badge.svg)](https://github.com/rohitgs28/mcpx/actions)
 [![Go Report Card](https://goreportcard.com/badge/github.com/rohitgs28/mcpx)](https://goreportcard.com/report/github.com/rohitgs28/mcpx)
@@ -16,7 +16,7 @@ MCP Client (Claude, Cursor, etc.)
       │
       ▼
   ┌────────┐
-  │  mcpx  │  auth · rate limit · policy · audit · metrics
+  │  mcpx  │  auth · rate limit · policy · audit · metrics · tool integrity
   └────────┘
       │
   ┌───┴────────┐
@@ -34,7 +34,7 @@ Most MCP gateway solutions require Kubernetes clusters, Docker Desktop, or full 
 | | mcpx | Microsoft MCP Gateway | Docker MCP Gateway | Kong AI MCP Proxy |
 |---|---|---|---|---|
 | **Setup time** | 5 minutes | Hours (K8s required) | Docker Desktop | Kong cluster |
-| **Dependencies** | None | Kubernetes, Azure | Docker | Kong, Lua runtime |
+| **Dependencies** | Single static binary | Kubernetes, Azure | Docker | Kong, Lua runtime |
 | **Config** | One YAML file | CRDs + Helm charts | UI + profiles | kong.yaml + plugins |
 | **Binary size** | ~10 MB | Cluster | Docker image | Full gateway |
 | **Target users** | Devs & small teams | Enterprise Azure | Docker users | Existing Kong users |
@@ -107,13 +107,31 @@ rate_limit:
   per_tool: true
   tool_rps: 10
   tool_burst: 5
+
+inspection:
+  tool_integrity: enforce   # off | warn | enforce — pin tool schemas, block mutation
+  filter_tools_list: true   # hide policy-denied tools from tools/list responses
 ```
 
 ## Features
 
 ### 🔐 Authentication
 
-Bearer token and API key authentication. Requests without valid credentials are rejected before reaching any backend. OAuth 2.1 support is on the [roadmap](ROADMAP.md).
+Bearer token, API key, and **OAuth 2.1** authentication. Requests without valid credentials are rejected before reaching any backend.
+
+In `oauth` mode mcpx acts as an OAuth 2.1 protected resource server aligned with the [MCP authorization spec](https://modelcontextprotocol.io/specification/draft/basic/authorization): it verifies JWT (RS256) signatures against the authorization server's JWKS and enforces **audience binding** (RFC 8707) — a token is rejected unless its `aud` claim names this gateway, which is the spec's defense against token-passthrough and confused-deputy attacks. It also publishes [RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728) Protected Resource Metadata at `/.well-known/oauth-protected-resource` and advertises it via `WWW-Authenticate` on `401` responses.
+
+```yaml
+auth:
+  enabled: true
+  type: oauth
+  oauth:
+    resource: "https://gateway.example.com/mcp"   # expected token audience
+    jwks_uri: "https://auth.example.com/.well-known/jwks.json"
+    issuer: "https://auth.example.com"             # optional
+    authorization_servers:
+      - "https://auth.example.com"
+```
 
 ### 🛡️ Tool-Level Access Control
 
@@ -124,6 +142,24 @@ policy:
   allow_tools: [read_file, list_directory]
   deny_tools: [write_file, delete_file]
 ```
+
+With `inspection.filter_tools_list: true`, denied tools are also stripped from `tools/list` responses, so the model never even sees a tool it cannot call.
+
+### 🔎 Tool Integrity Pinning
+
+mcpx hashes the **full schema** of every tool (name, description, and input schema) the first time a backend advertises it, then flags any later change. This deterministically detects **rug-pull tool mutation** ([CVE-2025-54136](https://nvd.nist.gov/vuln/detail/CVE-2025-54136)), cross-server shadowing, and full-schema poisoning — attacks where a server silently rewrites a tool the client already approved.
+
+```yaml
+inspection:
+  tool_integrity: enforce   # off | warn | enforce
+```
+
+- **`warn`** — log a violation to the audit trail, pass the tool through.
+- **`enforce`** — log it and drop the mutated tool from `tools/list` so clients can't invoke it.
+
+The baseline lives in memory and survives config hot-reloads. Hashing is canonical (key-order independent), so legitimate re-serialization doesn't trigger false positives.
+
+> **Scope note:** this defends *static* tool-schema integrity, which is deterministically checkable. It does **not** attempt regex/LLM scanning of tool descriptions or runtime tool *output* for prompt injection — those are bypassable and better handled by least-privilege scoping, so mcpx deliberately doesn't ship security theater there.
 
 ### ⏱️ Rate Limiting
 
@@ -175,6 +211,7 @@ Register multiple MCP servers behind a single gateway. Clients address them by n
 | `GET /health` | Deep health check with per-backend status |
 | `GET /servers` | List all registered backend servers |
 | `GET /metrics` | Prometheus metrics |
+| `GET /.well-known/oauth-protected-resource` | RFC 9728 metadata (only when `auth.type: oauth`) |
 
 ## Architecture
 
@@ -184,28 +221,31 @@ internal/
 ├── config/config.go           YAML config loading and validation
 ├── mcp/message.go             MCP JSON-RPC message types and parsing
 ├── proxy/proxy.go             Core reverse proxy with request inspection
-├── auth/auth.go               Bearer token and API key middleware
+├── auth/auth.go               Bearer, API key, and OAuth 2.1 middleware
+├── auth/oauth.go              JWT/JWKS validation + RFC 9728 metadata
 ├── ratelimit/ratelimit.go     Global and per-tool rate limiting
 ├── audit/audit.go             Structured audit logging (slog + JSON)
 ├── policy/policy.go           Tool-level allow/deny policy engine
-├── metrics/metrics.go         Prometheus-compatible metrics (zero deps)
+├── integrity/integrity.go     Full-schema tool pinning (rug-pull detection)
+├── metrics/metrics.go         Prometheus-compatible metrics (no deps)
 ├── health/health.go           Deep health checking with backend probes
 └── cors/cors.go               CORS middleware for browser clients
 ```
 
-**Middleware chain:** Auth → Rate Limit → Policy → Audit → Proxy → Backend
+**Middleware chain:** CORS → Metrics → Auth → Rate Limit → Gateway (Policy → Audit → Proxy)
 
-Every request is inspected at the MCP protocol level. The gateway parses JSON-RPC messages to extract the method and tool name, then evaluates the policy before forwarding.
+Every request is inspected at the MCP protocol level. The gateway parses JSON-RPC messages to extract the method and tool name, evaluates the policy before forwarding, and inspects `tools/list` responses for schema integrity and policy filtering on the way back.
 
 ## Roadmap
 
 See [ROADMAP.md](ROADMAP.md) for the full plan. Key upcoming work:
 
+- [x] OAuth 2.1 authentication (audience validation + RFC 9728 metadata)
+- [x] Full-schema tool integrity pinning (rug-pull detection)
+- [x] Hot config reload (SIGHUP + watch)
 - [ ] SSE/WebSocket transport proxying
-- [ ] OAuth 2.1 authentication
 - [ ] Stdio transport (spawn local MCP servers)
 - [ ] OpenTelemetry tracing
-- [ ] Hot config reload
 - [ ] Web dashboard
 - [ ] Plugin system (Go + WASM)
 - [ ] Helm chart

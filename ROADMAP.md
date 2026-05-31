@@ -24,12 +24,12 @@ Make mcpx the simplest, fastest way to secure MCP servers in production. One bin
 - [x] Docker support
 - [x] CI pipeline (build + test + lint)
 
-## Phase 2: Observability & Browser Support (Current)
+## Phase 2: Observability & Browser Support ✅
 
-- [ ] Prometheus metrics endpoint (`/metrics`) — request counts, latencies, tool usage, policy decisions
-- [ ] Deep health checks — probe each backend, report individual status and latency
-- [ ] CORS middleware — support browser-based MCP clients
-- [ ] Request ID propagation — trace requests across gateway and backends
+- [x] Prometheus metrics endpoint (`/metrics`) — request counts, latencies, tool usage, policy decisions
+- [x] Deep health checks — probe each backend, report individual status and latency
+- [x] CORS middleware — support browser-based MCP clients
+- [x] Request ID propagation — trace requests across gateway and backends
 - [ ] Structured error responses — consistent JSON error format with error codes
 
 ## Phase 3: Transport Support
@@ -41,12 +41,16 @@ Make mcpx the simplest, fastest way to secure MCP servers in production. One bin
 
 ## Phase 4: Enterprise Security
 
-- [ ] OAuth 2.1 authentication (aligned with MCP authorization spec)
-- [ ] JWT validation with JWKS endpoint support
+- [x] OAuth 2.1 authentication (aligned with MCP authorization spec)
+- [x] JWT validation with JWKS endpoint support (RS256)
+- [x] Audience validation (RFC 8707) + RFC 9728 Protected Resource Metadata
+- [x] Tool integrity pinning — full-schema hashing detects rug-pull/mutation (CVE-2025-54136)
+- [x] Tool-list filtering — hide policy-denied tools from `tools/list`
 - [ ] mTLS between gateway and backends
 - [ ] Per-client policies (multi-tenant access control)
 - [ ] Argument-level policy rules (e.g., allow `read_file` only for specific paths)
 - [ ] Secret injection — inject credentials into backend requests from a vault
+- [ ] ES256/EdDSA token signature support (RS256 today)
 
 ## Phase 5: Operational Excellence
 
@@ -72,7 +76,7 @@ Make mcpx the simplest, fastest way to secure MCP servers in production. One bin
 | | mcpx | Microsoft MCP Gateway | Docker MCP Gateway | Kong AI MCP Proxy |
 |---|---|---|---|---|
 | Setup | Single binary + YAML | Kubernetes cluster | Docker Desktop | Kong Gateway + plugin |
-| Dependencies | None | K8s, Azure | Docker | Kong, Lua |
+| Dependencies | Single static binary | K8s, Azure | Docker | Kong, Lua |
 | Config | One file | CRDs + Helm | UI + profiles | kong.yaml + plugins |
 | Overhead | ~10MB binary | Cluster | Docker daemon | Full API gateway |
 | Target | Individual devs, small teams | Enterprise on Azure | Docker users | Existing Kong users |

@@ -48,7 +48,7 @@ func TestEvaluate_UnknownServer(t *testing.T) {
 
 func TestEvaluate_ReadOnly_BlocksToolsCall(t *testing.T) {
 	servers := []config.ServerConfig{
-		{Name: "db", URL: "http://localhost:3002", Policy: config.Policy{ReadOnly: true}},
+		{Name: "db", URL: "http://localhost:3002", Policy: &config.Policy{ReadOnly: true}},
 	}
 	e := policy.New(servers)
 	req := makeRequest(mcp.MethodToolsCall, "execute_query")
@@ -64,7 +64,7 @@ func TestEvaluate_ReadOnly_BlocksToolsCall(t *testing.T) {
 
 func TestEvaluate_ReadOnly_AllowsToolsList(t *testing.T) {
 	servers := []config.ServerConfig{
-		{Name: "db", URL: "http://localhost:3002", Policy: config.Policy{ReadOnly: true}},
+		{Name: "db", URL: "http://localhost:3002", Policy: &config.Policy{ReadOnly: true}},
 	}
 	e := policy.New(servers)
 	req := makeRequest(mcp.MethodToolsList, "")
@@ -77,7 +77,7 @@ func TestEvaluate_ReadOnly_AllowsToolsList(t *testing.T) {
 
 func TestEvaluate_ReadOnly_AllowsInitialize(t *testing.T) {
 	servers := []config.ServerConfig{
-		{Name: "db", URL: "http://localhost:3002", Policy: config.Policy{ReadOnly: true}},
+		{Name: "db", URL: "http://localhost:3002", Policy: &config.Policy{ReadOnly: true}},
 	}
 	e := policy.New(servers)
 	req := makeRequest(mcp.MethodInitialize, "")
@@ -90,7 +90,7 @@ func TestEvaluate_ReadOnly_AllowsInitialize(t *testing.T) {
 
 func TestEvaluate_DenyList_Blocked(t *testing.T) {
 	servers := []config.ServerConfig{
-		{Name: "fs", URL: "http://localhost:3001", Policy: config.Policy{
+		{Name: "fs", URL: "http://localhost:3001", Policy: &config.Policy{
 			DenyTools: []string{"delete_file", "write_file"},
 		}},
 	}
@@ -109,7 +109,7 @@ func TestEvaluate_DenyList_Blocked(t *testing.T) {
 
 func TestEvaluate_DenyList_Allowed(t *testing.T) {
 	servers := []config.ServerConfig{
-		{Name: "fs", URL: "http://localhost:3001", Policy: config.Policy{
+		{Name: "fs", URL: "http://localhost:3001", Policy: &config.Policy{
 			DenyTools: []string{"delete_file", "write_file"},
 		}},
 	}
@@ -123,7 +123,7 @@ func TestEvaluate_DenyList_Allowed(t *testing.T) {
 
 func TestEvaluate_AllowList_Allowed(t *testing.T) {
 	servers := []config.ServerConfig{
-		{Name: "fs", URL: "http://localhost:3001", Policy: config.Policy{
+		{Name: "fs", URL: "http://localhost:3001", Policy: &config.Policy{
 			AllowTools: []string{"read_file", "list_directory", "search_files"},
 		}},
 	}
@@ -139,7 +139,7 @@ func TestEvaluate_AllowList_Allowed(t *testing.T) {
 
 func TestEvaluate_AllowList_Blocked(t *testing.T) {
 	servers := []config.ServerConfig{
-		{Name: "fs", URL: "http://localhost:3001", Policy: config.Policy{
+		{Name: "fs", URL: "http://localhost:3001", Policy: &config.Policy{
 			AllowTools: []string{"read_file", "list_directory"},
 		}},
 	}
@@ -153,7 +153,7 @@ func TestEvaluate_AllowList_Blocked(t *testing.T) {
 
 func TestEvaluate_NonToolsCall_AlwaysAllowed(t *testing.T) {
 	servers := []config.ServerConfig{
-		{Name: "fs", URL: "http://localhost:3001", Policy: config.Policy{
+		{Name: "fs", URL: "http://localhost:3001", Policy: &config.Policy{
 			AllowTools: []string{"read_file"},
 			DenyTools:  []string{"write_file"},
 		}},
@@ -173,12 +173,55 @@ func TestEvaluate_NonToolsCall_AlwaysAllowed(t *testing.T) {
 	}
 }
 
+func TestToolAllowed_NoPolicy(t *testing.T) {
+	e := policy.New([]config.ServerConfig{{Name: "s", URL: "http://x"}})
+	if !e.ToolAllowed("s", "anything") {
+		t.Fatal("expected tool allowed when no policy is set")
+	}
+	if !e.ToolAllowed("unknown", "anything") {
+		t.Fatal("expected tool allowed for unknown server (fail-open)")
+	}
+}
+
+func TestToolAllowed_ReadOnlyHidesAll(t *testing.T) {
+	e := policy.New([]config.ServerConfig{
+		{Name: "db", URL: "http://x", Policy: &config.Policy{ReadOnly: true}},
+	})
+	if e.ToolAllowed("db", "read_rows") {
+		t.Fatal("read-only server should hide all tools")
+	}
+}
+
+func TestToolAllowed_DenyList(t *testing.T) {
+	e := policy.New([]config.ServerConfig{
+		{Name: "fs", URL: "http://x", Policy: &config.Policy{DenyTools: []string{"delete_file"}}},
+	})
+	if e.ToolAllowed("fs", "delete_file") {
+		t.Fatal("denied tool should not be allowed")
+	}
+	if !e.ToolAllowed("fs", "read_file") {
+		t.Fatal("non-denied tool should be allowed")
+	}
+}
+
+func TestToolAllowed_AllowList(t *testing.T) {
+	e := policy.New([]config.ServerConfig{
+		{Name: "fs", URL: "http://x", Policy: &config.Policy{AllowTools: []string{"read_file"}}},
+	})
+	if !e.ToolAllowed("fs", "read_file") {
+		t.Fatal("allow-listed tool should be allowed")
+	}
+	if e.ToolAllowed("fs", "write_file") {
+		t.Fatal("tool not in allow list should be hidden")
+	}
+}
+
 func TestEvaluate_MultipleServers(t *testing.T) {
 	servers := []config.ServerConfig{
-		{Name: "fs", URL: "http://localhost:3001", Policy: config.Policy{
+		{Name: "fs", URL: "http://localhost:3001", Policy: &config.Policy{
 			DenyTools: []string{"delete_file"},
 		}},
-		{Name: "db", URL: "http://localhost:3002", Policy: config.Policy{
+		{Name: "db", URL: "http://localhost:3002", Policy: &config.Policy{
 			ReadOnly: true,
 		}},
 	}

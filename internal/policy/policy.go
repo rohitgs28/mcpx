@@ -10,11 +10,11 @@ import (
 )
 
 type Engine struct {
-	policies map[string]config.Policy
+	policies map[string]*config.Policy
 }
 
 func New(servers []config.ServerConfig) *Engine {
-	policies := make(map[string]config.Policy)
+	policies := make(map[string]*config.Policy)
 	for _, s := range servers { policies[s.Name] = s.Policy }
 	return &Engine{policies: policies}
 }
@@ -23,7 +23,7 @@ type Result struct { Allowed bool; Reason string }
 
 func (e *Engine) Evaluate(serverName string, req *mcp.Request) Result {
 	policy, ok := e.policies[serverName]
-	if !ok { return Result{Allowed: true} }
+	if !ok || policy == nil { return Result{Allowed: true} }
 	if policy.ReadOnly && req.Method == mcp.MethodToolsCall {
 		return Result{Allowed: false, Reason: fmt.Sprintf("server %q is in read-only mode: tools/call is blocked", serverName)}
 	}
@@ -38,4 +38,32 @@ func (e *Engine) Evaluate(serverName string, req *mcp.Request) Result {
 		return Result{Allowed: false, Reason: fmt.Sprintf("tool %q not in allow list for %q", tc.Name, serverName)}
 	}
 	return Result{Allowed: true}
+}
+
+// ToolAllowed reports whether a named tool may be called on a server under the
+// configured policy. It mirrors the tool-level decision in Evaluate and is used
+// to filter tools/list responses so clients never see tools they cannot call.
+// A read-only server hides all tools, since every tools/call on it is blocked.
+func (e *Engine) ToolAllowed(serverName, tool string) bool {
+	policy, ok := e.policies[serverName]
+	if !ok || policy == nil {
+		return true
+	}
+	if policy.ReadOnly {
+		return false
+	}
+	for _, d := range policy.DenyTools {
+		if d == tool {
+			return false
+		}
+	}
+	if len(policy.AllowTools) > 0 {
+		for _, a := range policy.AllowTools {
+			if a == tool {
+				return true
+			}
+		}
+		return false
+	}
+	return true
 }

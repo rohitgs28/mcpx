@@ -12,7 +12,11 @@ import (
 	"github.com/rohitgs28/mcpx/internal/config"
 )
 
-type Logger struct { logger *slog.Logger; enabled bool }
+type Logger struct {
+	logger  *slog.Logger
+	enabled bool
+	closer  io.Closer // underlying file when output is "file"; nil otherwise
+}
 
 type Entry struct {
 	Timestamp  time.Time `json:"timestamp"`
@@ -29,15 +33,24 @@ type Entry struct {
 func New(cfg config.AuditConfig) (*Logger, error) {
 	if !cfg.Enabled { return &Logger{enabled: false}, nil }
 	var w io.Writer
+	var closer io.Closer
 	switch cfg.Output {
 	case "file":
 		if cfg.Path == "" { return nil, fmt.Errorf("audit: file output requires a path") }
 		f, err := os.OpenFile(cfg.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err != nil { return nil, fmt.Errorf("audit: opening log file: %w", err) }
 		w = f
+		closer = f
 	default: w = os.Stdout
 	}
-	return &Logger{logger: slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})), enabled: true}, nil
+	return &Logger{logger: slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})), enabled: true, closer: closer}, nil
+}
+
+// Close releases the underlying log file, if any. It is safe to call on a
+// disabled logger or one writing to stdout (both are no-ops).
+func (l *Logger) Close() error {
+	if l.closer == nil { return nil }
+	return l.closer.Close()
 }
 
 func (l *Logger) Log(entry Entry) {

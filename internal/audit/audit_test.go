@@ -45,6 +45,7 @@ func TestNewFileValidTempPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	defer l.Close() // release the file handle before t.TempDir cleanup (required on Windows)
 	if !l.enabled {
 		t.Fatal("logger should be enabled")
 	}

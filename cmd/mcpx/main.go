@@ -30,6 +30,7 @@ import (
 	"github.com/rohitgs28/mcpx/internal/config"
 	"github.com/rohitgs28/mcpx/internal/cors"
 	"github.com/rohitgs28/mcpx/internal/health"
+	"github.com/rohitgs28/mcpx/internal/integrity"
 	"github.com/rohitgs28/mcpx/internal/metrics"
 	"github.com/rohitgs28/mcpx/internal/policy"
 	"github.com/rohitgs28/mcpx/internal/proxy"
@@ -62,10 +63,19 @@ func main() {
 	// Metrics collector persists across reloads so counters are not reset.
 	mc := metrics.New()
 
+	// Tool-schema pin store persists across reloads so the integrity baseline
+	// (and thus rug-pull detection) survives config changes. The mode is read
+	// once at startup.
+	integMode := integrity.ModeOff
+	if cfg.Inspection != nil {
+		integMode = integrity.ParseMode(cfg.Inspection.ToolIntegrity)
+	}
+	ts := integrity.NewStore(integMode)
+
 	// Build the initial handler and wrap it in a reloadable shell.
 	// On reload, we atomically swap the inner handler — new requests see
 	// the new config, in-flight requests finish against the old one.
-	initialHandler := buildHandler(cfg, mc)
+	initialHandler := buildHandler(cfg, mc, ts)
 	reloadable := newReloadableHandler(initialHandler)
 
 	// Build HTTP server against the reloadable wrapper. The listen address
@@ -87,7 +97,7 @@ func main() {
 			slog.Warn("listen address change requires restart; ignoring",
 				"current", initialListen, "new", newCfg.Listen)
 		}
-		h := buildHandler(newCfg, mc)
+		h := buildHandler(newCfg, mc, ts)
 		reloadable.swap(h)
 		slog.Info("config reloaded",
 			"servers", len(newCfg.Servers),
@@ -169,7 +179,7 @@ func main() {
 // It is called once at startup and again on every hot-reload.
 //
 // The metrics collector is passed in so that counters survive reloads.
-func buildHandler(cfg *config.Config, mc *metrics.Collector) http.Handler {
+func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store) http.Handler {
 	mc.SetServersRegistered(int64(len(cfg.Servers)))
 
 	// Build health checker with server info
@@ -190,24 +200,43 @@ func buildHandler(cfg *config.Config, mc *metrics.Collector) http.Handler {
 	}
 	checker := health.NewChecker(healthServers, version)
 
-	// Build the proxy handler
-	proxyHandler := proxy.New(cfg, mc)
+	// Policy enforcement and audit logging live inside the gateway: they
+	// need the parsed MCP message (server, method, tool), which the proxy
+	// already extracts when routing. The remaining concerns (auth, rate
+	// limiting, metrics, CORS) are HTTP-level and wrap the gateway.
+	pe := policy.New(cfg.Servers)
 
-	// Assemble middleware chain: CORS -> Auth -> Rate Limit -> Policy -> Audit -> Proxy
-	var handler http.Handler = proxyHandler
-
-	if cfg.Audit != nil && cfg.Audit.Enabled {
-		handler = audit.Middleware(cfg.Audit, handler)
+	auditCfg := config.AuditConfig{}
+	if cfg.Audit != nil {
+		auditCfg = *cfg.Audit
+	}
+	al, err := audit.New(auditCfg)
+	if err != nil {
+		slog.Error("failed to initialize audit logger, continuing without audit", "error", err)
+		al, _ = audit.New(config.AuditConfig{})
 	}
 
-	handler = policy.Middleware(cfg, handler)
+	gw, err := proxy.New(cfg, pe, al, ts)
+	if err != nil {
+		slog.Error("failed to build gateway, serving 503 on /mcp/", "error", err)
+	}
+
+	// Assemble middleware chain (outermost first): CORS -> Metrics -> Auth -> Rate Limit -> Gateway.
+	var handler http.Handler
+	if gw != nil {
+		handler = gw
+	} else {
+		handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, `{"error":"gateway misconfigured"}`, http.StatusServiceUnavailable)
+		})
+	}
 
 	if cfg.RateLimit != nil && cfg.RateLimit.Enabled {
-		handler = ratelimit.Middleware(cfg.RateLimit, mc, handler)
+		handler = ratelimit.New(*cfg.RateLimit).Middleware()(handler)
 	}
 
 	if cfg.Auth != nil && cfg.Auth.Enabled {
-		handler = auth.Middleware(cfg.Auth, mc, handler)
+		handler = auth.Middleware(*cfg.Auth)(handler)
 	}
 
 	handler = metricsMiddleware(mc, handler)
@@ -231,6 +260,12 @@ func buildHandler(cfg *config.Config, mc *metrics.Collector) http.Handler {
 		serversHandler(w, r, cfg)
 	})
 	mux.HandleFunc("/metrics", mc.Handler())
+
+	// When acting as an OAuth 2.1 resource server, publish RFC 9728 Protected
+	// Resource Metadata so clients can discover the authorization server.
+	if cfg.Auth != nil && cfg.Auth.Enabled && cfg.Auth.Type == "oauth" && cfg.Auth.OAuth != nil {
+		mux.HandleFunc(auth.MetadataPath, auth.ProtectedResourceMetadataHandler(*cfg.Auth.OAuth))
+	}
 
 	return mux
 }
