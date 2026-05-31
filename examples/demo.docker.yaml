@@ -1,0 +1,23 @@
+# Demo config for docker-compose (identical to demo.yaml, but the backend is
+# reached at the compose service hostname "mock" instead of localhost).
+#
+#   docker compose up --build
+#   curl -s localhost:8080/mcp/demo -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq
+
+listen: ":8080"
+
+servers:
+  - name: demo
+    url: http://mock:3001
+    transport: http
+    policy:
+      deny_tools:
+        - dangerous_delete
+
+audit:
+  enabled: true
+  output: stdout
+
+inspection:
+  tool_integrity: warn
+  filter_tools_list: true

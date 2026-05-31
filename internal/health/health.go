@@ -16,12 +16,12 @@ import (
 
 // Status represents the health of a single backend server.
 type Status struct {
-	Name      string        `json:"name"`
-	URL       string        `json:"url"`
-	Healthy   bool          `json:"healthy"`
-	LatencyMs float64       `json:"latency_ms,omitempty"`
-	Error     string        `json:"error,omitempty"`
-	CheckedAt time.Time     `json:"checked_at"`
+	Name      string         `json:"name"`
+	URL       string         `json:"url"`
+	Healthy   bool           `json:"healthy"`
+	LatencyMs float64        `json:"latency_ms,omitempty"`
+	Error     string         `json:"error,omitempty"`
+	CheckedAt time.Time      `json:"checked_at"`
 	Policy    *PolicySummary `json:"policy,omitempty"`
 }
 
@@ -43,9 +43,9 @@ type Report struct {
 
 // ServerInfo holds the info needed to probe a backend.
 type ServerInfo struct {
-	Name     string
-	URL      string
-	Policy   *PolicySummary
+	Name   string
+	URL    string
+	Policy *PolicySummary
 }
 
 // Checker performs health checks against registered backends.

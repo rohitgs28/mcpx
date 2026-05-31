@@ -1,0 +1,25 @@
+# One-command demo: a mock MCP server behind the mcpx gateway.
+#
+#   docker compose up --build
+#   curl -s localhost:8080/mcp/demo -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq
+#
+# You should see only `echo` and `read_file` — `dangerous_delete` is filtered
+# out by the policy in examples/demo.docker.yaml.
+
+services:
+  mock:
+    image: golang:1.22-alpine
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: ["go", "run", "./examples/mock-mcp"]
+
+  mcpx:
+    build: .
+    depends_on:
+      - mock
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./examples/demo.docker.yaml:/etc/mcpx/demo.yaml:ro
+    command: ["-c", "/etc/mcpx/demo.yaml"]
