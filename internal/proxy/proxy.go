@@ -16,6 +16,7 @@ import (
 
 	"github.com/rohitgs28/mcpx/internal/audit"
 	"github.com/rohitgs28/mcpx/internal/config"
+	"github.com/rohitgs28/mcpx/internal/httperr"
 	"github.com/rohitgs28/mcpx/internal/integrity"
 	"github.com/rohitgs28/mcpx/internal/mcp"
 	"github.com/rohitgs28/mcpx/internal/metrics"
@@ -78,7 +79,7 @@ func New(cfg *config.Config, pe *policy.Engine, al *audit.Logger, ts *integrity.
 			}
 			p := httputil.NewSingleHostReverseProxy(target)
 			p.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-				http.Error(w, fmt.Sprintf(`{"error":"upstream error: %s"}`, err.Error()), http.StatusBadGateway)
+				httperr.Write(w, http.StatusBadGateway, httperr.CodeUpstreamError, "upstream error: "+err.Error())
 			}
 			if g.inspect {
 				// Force identity encoding so ModifyResponse sees plain JSON,
@@ -132,12 +133,12 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 	sn := parts[0]
 	b, ok := g.servers[sn]
 	if !ok {
-		http.Error(w, fmt.Sprintf(`{"error":"unknown server: %s"}`, sn), http.StatusNotFound)
+		httperr.Write(w, http.StatusNotFound, httperr.CodeUnknownServer, "unknown server: "+sn)
 		return
 	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, `{"error":"failed to read request body"}`, http.StatusBadRequest)
+		httperr.Write(w, http.StatusBadRequest, httperr.CodeBadRequest, "failed to read request body")
 		return
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
@@ -156,10 +157,7 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 			entry.DurationMs = time.Since(start).Milliseconds()
 			g.audit.Log(entry)
 			g.recordToolCall(sn, entry.Tool, "deny")
-			resp := mcp.NewErrorResponse(mreq.ID, -32600, result.Reason)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(resp)
+			httperr.WriteRPC(w, http.StatusForbidden, mreq.ID, -32600, result.Reason)
 			return
 		}
 		g.recordToolCall(sn, entry.Tool, "allow")

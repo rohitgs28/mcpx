@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/rohitgs28/mcpx/internal/config"
+	"github.com/rohitgs28/mcpx/internal/httperr"
 )
 
 func Middleware(cfg config.AuthConfig) func(http.Handler) http.Handler {
@@ -24,11 +25,11 @@ func Middleware(cfg config.AuthConfig) func(http.Handler) http.Handler {
 			case "bearer":
 				h := r.Header.Get("Authorization")
 				if !strings.HasPrefix(h, "Bearer ") {
-					http.Error(w, `{"error":"missing Authorization header"}`, http.StatusUnauthorized)
+					httperr.Write(w, http.StatusUnauthorized, httperr.CodeUnauthorized, "missing Authorization header")
 					return
 				}
 				if subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(h, "Bearer ")), []byte(cfg.Token)) != 1 {
-					http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+					httperr.Write(w, http.StatusUnauthorized, httperr.CodeUnauthorized, "invalid token")
 					return
 				}
 			case "api_key":
@@ -37,19 +38,19 @@ func Middleware(cfg config.AuthConfig) func(http.Handler) http.Handler {
 					hdr = "X-API-Key"
 				}
 				if subtle.ConstantTimeCompare([]byte(r.Header.Get(hdr)), []byte(cfg.Token)) != 1 {
-					http.Error(w, `{"error":"invalid API key"}`, http.StatusUnauthorized)
+					httperr.Write(w, http.StatusUnauthorized, httperr.CodeUnauthorized, "invalid API key")
 					return
 				}
 			case "oauth":
 				h := r.Header.Get("Authorization")
 				if !strings.HasPrefix(h, "Bearer ") {
 					w.Header().Set("WWW-Authenticate", challenge(validator.cfg.Resource))
-					http.Error(w, `{"error":"missing bearer token"}`, http.StatusUnauthorized)
+					httperr.Write(w, http.StatusUnauthorized, httperr.CodeUnauthorized, "missing bearer token")
 					return
 				}
 				if err := validator.Validate(strings.TrimPrefix(h, "Bearer ")); err != nil {
 					w.Header().Set("WWW-Authenticate", challenge(validator.cfg.Resource))
-					http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+					httperr.Write(w, http.StatusUnauthorized, httperr.CodeUnauthorized, "invalid token")
 					return
 				}
 			}

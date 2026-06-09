@@ -30,6 +30,7 @@ import (
 	"github.com/rohitgs28/mcpx/internal/config"
 	"github.com/rohitgs28/mcpx/internal/cors"
 	"github.com/rohitgs28/mcpx/internal/health"
+	"github.com/rohitgs28/mcpx/internal/httperr"
 	"github.com/rohitgs28/mcpx/internal/integrity"
 	"github.com/rohitgs28/mcpx/internal/metrics"
 	"github.com/rohitgs28/mcpx/internal/policy"
@@ -227,7 +228,7 @@ func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store
 		handler = gw
 	} else {
 		handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			http.Error(w, `{"error":"gateway misconfigured"}`, http.StatusServiceUnavailable)
+			httperr.Write(w, http.StatusServiceUnavailable, httperr.CodeMisconfigured, "gateway misconfigured")
 		})
 	}
 
