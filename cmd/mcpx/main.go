@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -33,6 +34,7 @@ import (
 	"github.com/rohitgs28/mcpx/internal/httperr"
 	"github.com/rohitgs28/mcpx/internal/integrity"
 	"github.com/rohitgs28/mcpx/internal/metrics"
+	"github.com/rohitgs28/mcpx/internal/middleware"
 	"github.com/rohitgs28/mcpx/internal/policy"
 	"github.com/rohitgs28/mcpx/internal/proxy"
 	"github.com/rohitgs28/mcpx/internal/ratelimit"
@@ -76,8 +78,14 @@ func main() {
 	// Build the initial handler and wrap it in a reloadable shell.
 	// On reload, we atomically swap the inner handler — new requests see
 	// the new config, in-flight requests finish against the old one.
-	initialHandler := buildHandler(cfg, mc, ts)
+	initialHandler, initialAudit := buildHandler(cfg, mc, ts)
 	reloadable := newReloadableHandler(initialHandler)
+
+	// currentAudit tracks the live audit logger so its file handle can be
+	// closed when retired. Guarded by auditMu: reload runs on the SIGHUP
+	// and watch goroutines, the final Close on the main goroutine.
+	var auditMu sync.Mutex
+	currentAudit := initialAudit
 
 	// Build HTTP server against the reloadable wrapper. The listen address
 	// is captured from the initial config; changing it requires a restart.
@@ -98,8 +106,17 @@ func main() {
 			slog.Warn("listen address change requires restart; ignoring",
 				"current", initialListen, "new", newCfg.Listen)
 		}
-		h := buildHandler(newCfg, mc, ts)
+		h, newAudit := buildHandler(newCfg, mc, ts)
 		reloadable.swap(h)
+		// Close the retired audit logger's file handle. In-flight requests
+		// on the old handler may lose their audit lines — acceptable, and
+		// strictly better than leaking a handle on every reload.
+		auditMu.Lock()
+		if currentAudit != nil {
+			currentAudit.Close()
+		}
+		currentAudit = newAudit
+		auditMu.Unlock()
 		slog.Info("config reloaded",
 			"servers", len(newCfg.Servers),
 			"auth", newCfg.Auth != nil && newCfg.Auth.Enabled,
@@ -172,6 +189,12 @@ func main() {
 		slog.Error("shutdown error", "error", err)
 	}
 
+	auditMu.Lock()
+	if currentAudit != nil {
+		currentAudit.Close()
+	}
+	auditMu.Unlock()
+
 	slog.Info("mcpx stopped")
 }
 
@@ -180,7 +203,9 @@ func main() {
 // It is called once at startup and again on every hot-reload.
 //
 // The metrics collector is passed in so that counters survive reloads.
-func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store) http.Handler {
+// The returned audit logger is owned by the caller, which must Close it
+// when the handler is retired (reload swap or shutdown).
+func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store) (http.Handler, *audit.Logger) {
 	mc.SetServersRegistered(int64(len(cfg.Servers)))
 
 	// Build health checker with server info
@@ -268,7 +293,7 @@ func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store
 		mux.HandleFunc(auth.MetadataPath, auth.ProtectedResourceMetadataHandler(*cfg.Auth.OAuth))
 	}
 
-	return mux
+	return middleware.RequestID(mux), al
 }
 
 // reloadableHandler is an http.Handler that forwards every request to
