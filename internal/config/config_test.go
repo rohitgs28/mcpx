@@ -100,6 +100,70 @@ servers:
 	}
 }
 
+func TestValidateToolRules(t *testing.T) {
+	valid := `
+servers:
+  - name: fs
+    url: http://localhost:3001
+    policy:
+      tool_rules:
+        read_file:
+          args:
+            path: { prefix: "/data/" }
+            tag: { regex: "^[a-z]+$", required: true }
+`
+	cfg, err := loadFromStringErr(valid)
+	if err != nil {
+		t.Fatalf("valid tool_rules rejected: %v", err)
+	}
+	ar := cfg.Servers[0].Policy.ToolRules["read_file"].Args["path"]
+	if ar.Prefix != "/data/" {
+		t.Errorf("prefix = %q, want /data/", ar.Prefix)
+	}
+
+	badRegex := `
+servers:
+  - name: fs
+    url: http://localhost:3001
+    policy:
+      tool_rules:
+        read_file:
+          args:
+            path: { regex: "([" }
+`
+	if _, err := loadFromStringErr(badRegex); err == nil {
+		t.Error("expected error for invalid regex in tool_rules")
+	}
+
+	emptyRule := `
+servers:
+  - name: fs
+    url: http://localhost:3001
+    policy:
+      tool_rules:
+        read_file:
+          args:
+            path: {}
+`
+	if _, err := loadFromStringErr(emptyRule); err == nil {
+		t.Error("expected error for arg rule with no constraints")
+	}
+
+	typoKey := `
+servers:
+  - name: fs
+    url: http://localhost:3001
+    policy:
+      tool_rules:
+        read_file:
+          args:
+            path: { prefx: "/data/" }
+`
+	if _, err := loadFromStringErr(typoKey); err == nil {
+		t.Error("expected misspelled constraint key to be rejected (rule is empty)")
+	}
+}
+
 func TestValidateAuthType(t *testing.T) {
 	yaml := `
 servers:

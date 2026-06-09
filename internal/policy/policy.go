@@ -1,24 +1,65 @@
 // Package policy enforces tool-level access control on MCP requests.
-// It evaluates allow/deny lists and read-only modes per backend server.
+// It evaluates allow/deny lists, read-only modes, and per-tool argument
+// rules per backend server.
 package policy
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
 
 	"github.com/rohitgs28/mcpx/internal/config"
 	"github.com/rohitgs28/mcpx/internal/mcp"
 )
 
 type Engine struct {
-	policies map[string]*config.Policy
+	policies map[string]*compiledPolicy
+}
+
+// compiledPolicy pairs a config policy with its pre-compiled argument rules
+// (tool -> arg -> rule) so regexes compile once at load, not per request.
+type compiledPolicy struct {
+	cfg   *config.Policy
+	rules map[string]map[string]compiledArgRule
+}
+
+type compiledArgRule struct {
+	config.ArgRule
+	re *regexp.Regexp
 }
 
 func New(servers []config.ServerConfig) *Engine {
-	policies := make(map[string]*config.Policy)
+	policies := make(map[string]*compiledPolicy)
 	for _, s := range servers {
-		policies[s.Name] = s.Policy
+		policies[s.Name] = compile(s.Policy)
 	}
 	return &Engine{policies: policies}
+}
+
+// compile pre-compiles a policy's argument rules. Invalid regexes cannot
+// occur post config.Validate; defensively, a rule whose regex fails to
+// compile keeps re == nil and the regex constraint then fails closed.
+func compile(p *config.Policy) *compiledPolicy {
+	if p == nil {
+		return nil
+	}
+	cp := &compiledPolicy{cfg: p}
+	if len(p.ToolRules) > 0 {
+		cp.rules = make(map[string]map[string]compiledArgRule, len(p.ToolRules))
+		for tool, tr := range p.ToolRules {
+			args := make(map[string]compiledArgRule, len(tr.Args))
+			for arg, ar := range tr.Args {
+				car := compiledArgRule{ArgRule: ar}
+				if ar.Regex != "" {
+					car.re, _ = regexp.Compile(ar.Regex)
+				}
+				args[arg] = car
+			}
+			cp.rules[tool] = args
+		}
+	}
+	return cp
 }
 
 type Result struct {
@@ -27,10 +68,17 @@ type Result struct {
 }
 
 func (e *Engine) Evaluate(serverName string, req *mcp.Request) Result {
-	policy, ok := e.policies[serverName]
-	if !ok || policy == nil {
+	cp, ok := e.policies[serverName]
+	if !ok || cp == nil {
 		return Result{Allowed: true}
 	}
+	return evalPolicy(cp, serverName, req)
+}
+
+// evalPolicy applies one policy to a request: read-only mode, deny list,
+// allow list, then per-tool argument rules.
+func evalPolicy(cp *compiledPolicy, serverName string, req *mcp.Request) Result {
+	policy := cp.cfg
 	if policy.ReadOnly && req.Method == mcp.MethodToolsCall {
 		return Result{Allowed: false, Reason: fmt.Sprintf("server %q is in read-only mode: tools/call is blocked", serverName)}
 	}
@@ -47,25 +95,99 @@ func (e *Engine) Evaluate(serverName string, req *mcp.Request) Result {
 		}
 	}
 	if len(policy.AllowTools) > 0 {
+		allowed := false
 		for _, a := range policy.AllowTools {
 			if a == tc.Name {
-				return Result{Allowed: true}
+				allowed = true
+				break
 			}
 		}
-		return Result{Allowed: false, Reason: fmt.Sprintf("tool %q not in allow list for %q", tc.Name, serverName)}
+		if !allowed {
+			return Result{Allowed: false, Reason: fmt.Sprintf("tool %q not in allow list for %q", tc.Name, serverName)}
+		}
+	}
+	return evalArgRules(cp.rules[tc.Name], serverName, tc)
+}
+
+// evalArgRules checks a tool call's arguments against the tool's compiled
+// rules. Values are normalized to strings deterministically; a rule that
+// targets a non-scalar value fails closed.
+func evalArgRules(rules map[string]compiledArgRule, serverName string, tc *mcp.ToolCallParams) Result {
+	for arg, rule := range rules {
+		val, present := tc.Arguments[arg]
+		if !present {
+			if rule.Required {
+				return Result{Allowed: false, Reason: fmt.Sprintf("tool %q on server %q: required argument %q is missing", tc.Name, serverName, arg)}
+			}
+			continue
+		}
+		s, scalar := normalize(val)
+		if !scalar {
+			return Result{Allowed: false, Reason: fmt.Sprintf("tool %q argument %q has a non-scalar value, which rules cannot evaluate", tc.Name, arg)}
+		}
+		if violated := checkArg(rule, s); violated != "" {
+			return Result{Allowed: false, Reason: fmt.Sprintf("tool %q argument %q violates %s rule", tc.Name, arg, violated)}
+		}
 	}
 	return Result{Allowed: true}
+}
+
+// checkArg returns the name of the first violated constraint, or "".
+func checkArg(rule compiledArgRule, s string) string {
+	if rule.Equals != nil && s != *rule.Equals {
+		return "equals"
+	}
+	if len(rule.OneOf) > 0 {
+		found := false
+		for _, v := range rule.OneOf {
+			if v == s {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return "one_of"
+		}
+	}
+	if rule.Prefix != "" && !strings.HasPrefix(s, rule.Prefix) {
+		return "prefix"
+	}
+	if rule.Suffix != "" && !strings.HasSuffix(s, rule.Suffix) {
+		return "suffix"
+	}
+	if rule.Regex != "" && (rule.re == nil || !rule.re.MatchString(s)) {
+		return "regex"
+	}
+	return ""
+}
+
+// normalize converts a decoded JSON argument value to its string form for
+// comparison. Returns ok=false for non-scalar values (objects, arrays, null).
+func normalize(v any) (string, bool) {
+	switch x := v.(type) {
+	case string:
+		return x, true
+	case bool:
+		return strconv.FormatBool(x), true
+	case float64:
+		return strconv.FormatFloat(x, 'f', -1, 64), true
+	default:
+		return "", false
+	}
 }
 
 // ToolAllowed reports whether a named tool may be called on a server under the
 // configured policy. It mirrors the tool-level decision in Evaluate and is used
 // to filter tools/list responses so clients never see tools they cannot call.
 // A read-only server hides all tools, since every tools/call on it is blocked.
+// Argument rules do not affect visibility: a tool that is callable with the
+// right arguments stays listed.
 func (e *Engine) ToolAllowed(serverName, tool string) bool {
-	policy, ok := e.policies[serverName]
-	if !ok || policy == nil {
+	cp, ok := e.policies[serverName]
+	if !ok || cp == nil {
 		return true
 	}
+	policy := cp.cfg
 	if policy.ReadOnly {
 		return false
 	}

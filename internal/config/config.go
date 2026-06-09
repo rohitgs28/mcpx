@@ -7,6 +7,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
 
 	"gopkg.in/yaml.v3"
 )
@@ -42,9 +43,32 @@ type ServerConfig struct {
 
 // Policy defines tool-level access control for a server.
 type Policy struct {
-	ReadOnly   bool     `yaml:"read_only"`
-	AllowTools []string `yaml:"allow_tools"`
-	DenyTools  []string `yaml:"deny_tools"`
+	ReadOnly   bool                `yaml:"read_only"`
+	AllowTools []string            `yaml:"allow_tools"`
+	DenyTools  []string            `yaml:"deny_tools"`
+	ToolRules  map[string]ToolRule `yaml:"tool_rules"` // per-tool argument constraints
+}
+
+// ToolRule constrains the arguments a tool may be called with.
+type ToolRule struct {
+	Args map[string]ArgRule `yaml:"args"`
+}
+
+// ArgRule is a deterministic constraint on a single top-level tool argument.
+// Multiple constraints on the same argument are ANDed. Rules only constrain
+// the arguments they name: an absent argument passes unless Required is set.
+// Scalar values are compared as strings (bools as "true"/"false", numbers in
+// their shortest decimal form); a rule that targets a non-scalar value
+// (object, array, null) denies the call — what cannot be compared cannot be
+// allowed. Prefix is a literal string check: no path canonicalization is
+// performed.
+type ArgRule struct {
+	Equals   *string  `yaml:"equals"` // pointer so "" is distinguishable from unset
+	OneOf    []string `yaml:"one_of"`
+	Prefix   string   `yaml:"prefix"`
+	Suffix   string   `yaml:"suffix"`
+	Regex    string   `yaml:"regex"`
+	Required bool     `yaml:"required"`
 }
 
 // AuthConfig defines authentication settings.
@@ -145,6 +169,9 @@ func (c *Config) Validate() error {
 		default:
 			return fmt.Errorf("server %q: transport must be \"http\" or \"sse\" (got %q)", srv.Name, srv.Transport)
 		}
+		if err := validatePolicy(srv.Policy, fmt.Sprintf("server %q", srv.Name)); err != nil {
+			return err
+		}
 	}
 
 	if c.Auth != nil && c.Auth.Enabled {
@@ -188,5 +215,27 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	return nil
+}
+
+// validatePolicy checks a policy's tool_rules: every argument rule must carry
+// at least one constraint (which also catches misspelled constraint keys,
+// since those leave the rule empty) and regexes must compile.
+func validatePolicy(p *Policy, where string) error {
+	if p == nil {
+		return nil
+	}
+	for tool, tr := range p.ToolRules {
+		for arg, ar := range tr.Args {
+			if ar.Equals == nil && len(ar.OneOf) == 0 && ar.Prefix == "" && ar.Suffix == "" && ar.Regex == "" && !ar.Required {
+				return fmt.Errorf("%s: tool_rules.%s.args.%s: at least one constraint (equals, one_of, prefix, suffix, regex, required) is required", where, tool, arg)
+			}
+			if ar.Regex != "" {
+				if _, err := regexp.Compile(ar.Regex); err != nil {
+					return fmt.Errorf("%s: tool_rules.%s.args.%s: invalid regex: %w", where, tool, arg, err)
+				}
+			}
+		}
+	}
 	return nil
 }
