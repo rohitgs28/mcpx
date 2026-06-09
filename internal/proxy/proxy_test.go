@@ -42,11 +42,20 @@ func newGateway(t *testing.T, url string, pol *config.Policy, insp *config.Inspe
 		Servers:    []config.ServerConfig{{Name: "up", URL: url, Transport: "http", Policy: pol}},
 		Inspection: insp,
 	}
+	return newGatewayFromConfig(t, cfg, mode)
+}
+
+func newGatewayFromConfig(t *testing.T, cfg *config.Config, mode ...integrity.Mode) *proxy.Gateway {
+	t.Helper()
+	m := integrity.ModeOff
+	if len(mode) > 0 {
+		m = mode[0]
+	}
 	al, err := audit.New(config.AuditConfig{})
 	if err != nil {
 		t.Fatalf("audit.New: %v", err)
 	}
-	gw, err := proxy.New(cfg, policy.New(cfg.Servers), al, integrity.NewStore(mode), metrics.New())
+	gw, err := proxy.New(cfg, policy.New(cfg.Servers), al, integrity.NewStore(m), metrics.New())
 	if err != nil {
 		t.Fatalf("proxy.New: %v", err)
 	}

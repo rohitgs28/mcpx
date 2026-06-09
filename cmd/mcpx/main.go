@@ -349,7 +349,10 @@ func metricsMiddleware(mc *metrics.Collector, next http.Handler) http.Handler {
 	})
 }
 
-// responseWriter captures the status code for metrics.
+// responseWriter captures the status code for metrics. It stays
+// streaming-transparent: Flush delegates so SSE events reach the client
+// immediately, and Unwrap lets http.ResponseController (used by the
+// gateway to lift write deadlines for streams) reach the real writer.
 type responseWriter struct {
 	http.ResponseWriter
 	statusCode int
@@ -359,6 +362,14 @@ func (rw *responseWriter) WriteHeader(code int) {
 	rw.statusCode = code
 	rw.ResponseWriter.WriteHeader(code)
 }
+
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (rw *responseWriter) Unwrap() http.ResponseWriter { return rw.ResponseWriter }
 
 // extractServerName extracts the server name from /mcp/{server}/...
 func extractServerName(path string) string {

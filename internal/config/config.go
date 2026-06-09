@@ -36,7 +36,7 @@ type InspectionConfig struct {
 type ServerConfig struct {
 	Name      string  `yaml:"name"`
 	URL       string  `yaml:"url"`
-	Transport string  `yaml:"transport"` // "http", "sse", "websocket"
+	Transport string  `yaml:"transport"` // "http" (default) or its alias "sse"; SSE streams are auto-detected per response
 	Policy    *Policy `yaml:"policy"`
 }
 
@@ -136,8 +136,14 @@ func (c *Config) Validate() error {
 		if srv.URL == "" {
 			return fmt.Errorf("server %q: url is required", srv.Name)
 		}
-		if srv.Transport == "" {
+		switch srv.Transport {
+		case "":
 			c.Servers[i].Transport = "http"
+		case "http", "sse":
+			// valid; "sse" is an alias of "http" — streaming responses are
+			// detected per-response via Content-Type, not per-server.
+		default:
+			return fmt.Errorf("server %q: transport must be \"http\" or \"sse\" (got %q)", srv.Name, srv.Transport)
 		}
 	}
 

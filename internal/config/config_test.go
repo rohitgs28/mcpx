@@ -75,6 +75,31 @@ servers:
 	}
 }
 
+func TestValidateTransport(t *testing.T) {
+	tests := []struct {
+		transport string
+		wantErr   bool
+	}{
+		{"", false},
+		{"http", false},
+		{"sse", false},
+		{"websocket", true},
+		{"stdio", true},
+	}
+	for _, tt := range tests {
+		yaml := `
+servers:
+  - name: test
+    url: http://localhost:3001
+    transport: "` + tt.transport + `"
+`
+		_, err := loadFromStringErr(yaml)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("transport %q: err = %v, wantErr %v", tt.transport, err, tt.wantErr)
+		}
+	}
+}
+
 func TestValidateAuthType(t *testing.T) {
 	yaml := `
 servers:

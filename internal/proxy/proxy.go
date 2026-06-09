@@ -72,22 +72,31 @@ func New(cfg *config.Config, pe *policy.Engine, al *audit.Logger, ts *integrity.
 	g.inspect = g.filter || (ts != nil && ts.Enabled())
 
 	for _, sc := range cfg.Servers {
-		if sc.Transport == "http" {
+		if sc.Transport == "http" || sc.Transport == "sse" {
 			target, err := url.Parse(sc.URL)
 			if err != nil {
 				return nil, fmt.Errorf("parsing URL for server %q: %w", sc.Name, err)
 			}
 			p := httputil.NewSingleHostReverseProxy(target)
+			// The stdlib flushes text/event-stream bodies immediately; the
+			// interval covers other streaming content types (e.g. ndjson).
+			p.FlushInterval = 100 * time.Millisecond
 			p.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 				httperr.Write(w, http.StatusBadGateway, httperr.CodeUpstreamError, "upstream error: "+err.Error())
 			}
 			if g.inspect {
 				// Force identity encoding so ModifyResponse sees plain JSON,
-				// then inspect tools/list responses.
+				// then inspect tools/list responses. tools/list is also pinned
+				// to a JSON response: a Streamable HTTP backend may otherwise
+				// answer over SSE, which would bypass integrity pinning and
+				// list filtering.
 				orig := p.Director
 				p.Director = func(req *http.Request) {
 					orig(req)
 					req.Header.Del("Accept-Encoding")
+					if info, _ := req.Context().Value(ctxKeyReqInfo).(*reqInfo); info != nil && info.method == mcp.MethodToolsList {
+						req.Header.Set("Accept", "application/json")
+					}
 				}
 				p.ModifyResponse = g.modifyResponse
 			}
@@ -171,6 +180,11 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 	if len(parts) > 1 {
 		r.URL.Path = "/" + parts[1]
 	}
+	// Clients that accept SSE may receive a long-lived stream, which must
+	// outlive the server's global WriteTimeout.
+	if strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+	}
 	b.Proxy.ServeHTTP(w, r)
 	entry.DurationMs = time.Since(start).Milliseconds()
 	entry.StatusCode = http.StatusOK
@@ -181,6 +195,11 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 // pinning and policy-based tool filtering before the body reaches the client.
 // All other responses pass through untouched.
 func (g *Gateway) modifyResponse(resp *http.Response) error {
+	// Streaming responses (MCP Streamable HTTP / SSE) pass through untouched:
+	// reading the body here would buffer the stream and stall the client.
+	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		return nil
+	}
 	info, _ := resp.Request.Context().Value(ctxKeyReqInfo).(*reqInfo)
 	if info == nil || info.method != mcp.MethodToolsList || resp.StatusCode != http.StatusOK {
 		return nil
