@@ -14,13 +14,23 @@ import (
 
 // Config is the top-level gateway configuration.
 type Config struct {
-	Listen     string            `yaml:"listen"`
-	Servers    []ServerConfig    `yaml:"servers"`
-	Auth       *AuthConfig       `yaml:"auth"`
-	Audit      *AuditConfig      `yaml:"audit"`
-	RateLimit  *RateLimitConfig  `yaml:"rate_limit"`
-	CORS       *CORSConfig       `yaml:"cors"`
-	Inspection *InspectionConfig `yaml:"inspection"`
+	Listen     string                  `yaml:"listen"`
+	Servers    []ServerConfig          `yaml:"servers"`
+	Auth       *AuthConfig             `yaml:"auth"`
+	Audit      *AuditConfig            `yaml:"audit"`
+	RateLimit  *RateLimitConfig        `yaml:"rate_limit"`
+	CORS       *CORSConfig             `yaml:"cors"`
+	Inspection *InspectionConfig       `yaml:"inspection"`
+	Clients    map[string]ClientConfig `yaml:"clients"` // per-client policy overrides, keyed by client name
+}
+
+// ClientConfig narrows what an authenticated client may do, per server.
+// The effective decision is the intersection of the server policy and the
+// client's override: BOTH must allow a call. Client names come from auth
+// (named credentials for bearer/api_key, the identity claim for OAuth);
+// a client with no entry here gets the server baseline policy.
+type ClientConfig struct {
+	Servers map[string]*Policy `yaml:"servers"`
 }
 
 // InspectionConfig controls response-level inspection of tools/list payloads.
@@ -75,9 +85,22 @@ type ArgRule struct {
 type AuthConfig struct {
 	Enabled bool         `yaml:"enabled"`
 	Type    string       `yaml:"type"`   // "bearer", "api_key", "none", "oauth"
-	Token   string       `yaml:"token"`  // for bearer auth
+	Token   string       `yaml:"token"`  // single shared token for bearer/api_key (identifies as client "default")
 	Header  string       `yaml:"header"` // for api_key auth (default: X-API-Key)
 	OAuth   *OAuthConfig `yaml:"oauth"`  // for oauth (OAuth 2.1 resource server)
+	// Clients lists named credentials for bearer/api_key auth so requests
+	// carry a client identity (used by per-client policies and audit logs).
+	// May be combined with Token, which matches as client "default".
+	Clients []ClientCredential `yaml:"clients"`
+	// IdentityClaim is the JWT claim used as the client identity for oauth
+	// (default "sub").
+	IdentityClaim string `yaml:"identity_claim"`
+}
+
+// ClientCredential is a named bearer/api_key token.
+type ClientCredential struct {
+	Name  string `yaml:"name"`
+	Token string `yaml:"token"`
 }
 
 // OAuthConfig configures the gateway as an OAuth 2.1 protected resource server,
@@ -181,8 +204,21 @@ func (c *Config) Validate() error {
 		default:
 			return fmt.Errorf("auth.type must be \"bearer\", \"api_key\", \"oauth\", or \"none\" (got %q)", c.Auth.Type)
 		}
-		if c.Auth.Type == "bearer" && c.Auth.Token == "" {
-			return fmt.Errorf("auth.token is required when auth.type is \"bearer\"")
+		if (c.Auth.Type == "bearer" || c.Auth.Type == "api_key") && c.Auth.Token == "" && len(c.Auth.Clients) == 0 {
+			return fmt.Errorf("auth.token or auth.clients is required when auth.type is %q", c.Auth.Type)
+		}
+		seen := make(map[string]bool, len(c.Auth.Clients))
+		for i, cc := range c.Auth.Clients {
+			if cc.Name == "" {
+				return fmt.Errorf("auth.clients[%d]: name is required", i)
+			}
+			if cc.Token == "" {
+				return fmt.Errorf("auth.clients[%d] (%q): token is required", i, cc.Name)
+			}
+			if seen[cc.Name] {
+				return fmt.Errorf("auth.clients: duplicate client name %q", cc.Name)
+			}
+			seen[cc.Name] = true
 		}
 		if c.Auth.Type == "oauth" {
 			if c.Auth.OAuth == nil {
@@ -212,6 +248,19 @@ func (c *Config) Validate() error {
 			// valid
 		default:
 			return fmt.Errorf("inspection.tool_integrity must be \"off\", \"warn\", or \"enforce\" (got %q)", c.Inspection.ToolIntegrity)
+		}
+	}
+
+	// Client policy names are deliberately not checked against auth.clients:
+	// OAuth identities (JWT subjects) are not enumerable in config.
+	for name, cc := range c.Clients {
+		if name == "" {
+			return fmt.Errorf("clients: client name must not be empty")
+		}
+		for srv, p := range cc.Servers {
+			if err := validatePolicy(p, fmt.Sprintf("clients.%s.servers.%s", name, srv)); err != nil {
+				return err
+			}
 		}
 	}
 

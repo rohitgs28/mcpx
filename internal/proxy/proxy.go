@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/rohitgs28/mcpx/internal/audit"
+	"github.com/rohitgs28/mcpx/internal/auth"
 	"github.com/rohitgs28/mcpx/internal/config"
 	"github.com/rohitgs28/mcpx/internal/httperr"
 	"github.com/rohitgs28/mcpx/internal/integrity"
@@ -52,6 +53,7 @@ const ctxKeyReqInfo ctxKey = iota
 type reqInfo struct {
 	server string
 	method string
+	client string
 }
 
 // New builds a gateway. The policy engine and audit logger enforce/record
@@ -128,11 +130,11 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) { g.mux.Serv
 
 // recordToolCall records a tools/call policy decision. It is a no-op for
 // non-tool requests (empty tool) and when no metrics collector is configured.
-func (g *Gateway) recordToolCall(server, tool, decision string) {
+func (g *Gateway) recordToolCall(server, tool, decision, client string) {
 	if g.metrics == nil || tool == "" {
 		return
 	}
-	g.metrics.RecordToolCall(server, tool, decision)
+	g.metrics.RecordToolCall(server, tool, decision, client)
 }
 
 func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
@@ -152,27 +154,28 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	mreq, _ := mcp.ParseRequest(body)
-	entry := audit.Entry{Timestamp: time.Now().UTC(), Server: sn, ClientIP: r.RemoteAddr}
+	client := auth.ClientFrom(r.Context())
+	entry := audit.Entry{Timestamp: time.Now().UTC(), Server: sn, Client: client, ClientIP: r.RemoteAddr}
 	if mreq != nil {
 		entry.Method = mreq.Method
 		if tc, _ := mcp.ParseToolCall(mreq); tc != nil {
 			entry.Tool = tc.Name
 		}
-		result := g.policy.Evaluate(sn, mreq)
+		result := g.policy.Evaluate(sn, client, mreq)
 		if !result.Allowed {
 			entry.Allowed = false
 			entry.Reason = result.Reason
 			entry.StatusCode = http.StatusForbidden
 			entry.DurationMs = time.Since(start).Milliseconds()
 			g.audit.Log(entry)
-			g.recordToolCall(sn, entry.Tool, "deny")
+			g.recordToolCall(sn, entry.Tool, "deny", client)
 			httperr.WriteRPC(w, http.StatusForbidden, mreq.ID, -32600, result.Reason)
 			return
 		}
-		g.recordToolCall(sn, entry.Tool, "allow")
+		g.recordToolCall(sn, entry.Tool, "allow", client)
 		// Thread routing details into ModifyResponse for tools/list inspection.
 		if g.inspect {
-			r = r.WithContext(context.WithValue(r.Context(), ctxKeyReqInfo, &reqInfo{server: sn, method: mreq.Method}))
+			r = r.WithContext(context.WithValue(r.Context(), ctxKeyReqInfo, &reqInfo{server: sn, method: mreq.Method, client: client}))
 		}
 	}
 	entry.Allowed = true
@@ -214,7 +217,7 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 	if err != nil {
 		return err
 	}
-	newBody, changed := g.processToolsList(info.server, body)
+	newBody, changed := g.processToolsList(info.server, info.client, body)
 	if !changed {
 		resp.Body = io.NopCloser(bytes.NewReader(body))
 		return nil
@@ -229,7 +232,7 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 // whether it changed. It drops tools whose schema mutated (enforce mode) and
 // tools the policy forbids (when filtering is enabled), logging integrity
 // violations to the audit trail.
-func (g *Gateway) processToolsList(server string, body []byte) ([]byte, bool) {
+func (g *Gateway) processToolsList(server, client string, body []byte) ([]byte, bool) {
 	var rpc mcp.Response
 	if err := json.Unmarshal(body, &rpc); err != nil || rpc.Error != nil || len(rpc.Result) == 0 {
 		return body, false
@@ -267,7 +270,7 @@ func (g *Gateway) processToolsList(server string, body []byte) ([]byte, bool) {
 			changed = true
 			continue
 		}
-		if g.filter && !g.policy.ToolAllowed(server, name) {
+		if g.filter && !g.policy.ToolAllowed(server, client, name) {
 			changed = true
 			continue
 		}

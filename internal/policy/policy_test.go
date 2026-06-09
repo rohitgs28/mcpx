@@ -27,20 +27,20 @@ func TestEvaluate_NoPolicy(t *testing.T) {
 	servers := []config.ServerConfig{
 		{Name: "test", URL: "http://localhost:3000"},
 	}
-	e := policy.New(servers)
+	e := policy.New(servers, nil)
 	req := makeRequest(mcp.MethodToolsCall, "read_file")
 
-	result := e.Evaluate("test", req)
+	result := e.Evaluate("test", "", req)
 	if !result.Allowed {
 		t.Fatal("expected allowed when no policy restrictions are set")
 	}
 }
 
 func TestEvaluate_UnknownServer(t *testing.T) {
-	e := policy.New(nil)
+	e := policy.New(nil, nil)
 	req := makeRequest(mcp.MethodToolsCall, "read_file")
 
-	result := e.Evaluate("nonexistent", req)
+	result := e.Evaluate("nonexistent", "", req)
 	if !result.Allowed {
 		t.Fatal("expected allowed for unknown server (fail-open)")
 	}
@@ -50,10 +50,10 @@ func TestEvaluate_ReadOnly_BlocksToolsCall(t *testing.T) {
 	servers := []config.ServerConfig{
 		{Name: "db", URL: "http://localhost:3002", Policy: &config.Policy{ReadOnly: true}},
 	}
-	e := policy.New(servers)
+	e := policy.New(servers, nil)
 	req := makeRequest(mcp.MethodToolsCall, "execute_query")
 
-	result := e.Evaluate("db", req)
+	result := e.Evaluate("db", "", req)
 	if result.Allowed {
 		t.Fatal("expected denied for tools/call on read-only server")
 	}
@@ -66,10 +66,10 @@ func TestEvaluate_ReadOnly_AllowsToolsList(t *testing.T) {
 	servers := []config.ServerConfig{
 		{Name: "db", URL: "http://localhost:3002", Policy: &config.Policy{ReadOnly: true}},
 	}
-	e := policy.New(servers)
+	e := policy.New(servers, nil)
 	req := makeRequest(mcp.MethodToolsList, "")
 
-	result := e.Evaluate("db", req)
+	result := e.Evaluate("db", "", req)
 	if !result.Allowed {
 		t.Fatal("expected allowed for tools/list even in read-only mode")
 	}
@@ -79,10 +79,10 @@ func TestEvaluate_ReadOnly_AllowsInitialize(t *testing.T) {
 	servers := []config.ServerConfig{
 		{Name: "db", URL: "http://localhost:3002", Policy: &config.Policy{ReadOnly: true}},
 	}
-	e := policy.New(servers)
+	e := policy.New(servers, nil)
 	req := makeRequest(mcp.MethodInitialize, "")
 
-	result := e.Evaluate("db", req)
+	result := e.Evaluate("db", "", req)
 	if !result.Allowed {
 		t.Fatal("expected allowed for initialize even in read-only mode")
 	}
@@ -94,14 +94,14 @@ func TestEvaluate_DenyList_Blocked(t *testing.T) {
 			DenyTools: []string{"delete_file", "write_file"},
 		}},
 	}
-	e := policy.New(servers)
+	e := policy.New(servers, nil)
 
-	result := e.Evaluate("fs", makeRequest(mcp.MethodToolsCall, "delete_file"))
+	result := e.Evaluate("fs", "", makeRequest(mcp.MethodToolsCall, "delete_file"))
 	if result.Allowed {
 		t.Fatal("expected denied for tool in deny list")
 	}
 
-	result = e.Evaluate("fs", makeRequest(mcp.MethodToolsCall, "write_file"))
+	result = e.Evaluate("fs", "", makeRequest(mcp.MethodToolsCall, "write_file"))
 	if result.Allowed {
 		t.Fatal("expected denied for tool in deny list")
 	}
@@ -113,9 +113,9 @@ func TestEvaluate_DenyList_Allowed(t *testing.T) {
 			DenyTools: []string{"delete_file", "write_file"},
 		}},
 	}
-	e := policy.New(servers)
+	e := policy.New(servers, nil)
 
-	result := e.Evaluate("fs", makeRequest(mcp.MethodToolsCall, "read_file"))
+	result := e.Evaluate("fs", "", makeRequest(mcp.MethodToolsCall, "read_file"))
 	if !result.Allowed {
 		t.Fatal("expected allowed for tool not in deny list")
 	}
@@ -127,10 +127,10 @@ func TestEvaluate_AllowList_Allowed(t *testing.T) {
 			AllowTools: []string{"read_file", "list_directory", "search_files"},
 		}},
 	}
-	e := policy.New(servers)
+	e := policy.New(servers, nil)
 
 	for _, tool := range []string{"read_file", "list_directory", "search_files"} {
-		result := e.Evaluate("fs", makeRequest(mcp.MethodToolsCall, tool))
+		result := e.Evaluate("fs", "", makeRequest(mcp.MethodToolsCall, tool))
 		if !result.Allowed {
 			t.Fatalf("expected allowed for %q in allow list", tool)
 		}
@@ -143,9 +143,9 @@ func TestEvaluate_AllowList_Blocked(t *testing.T) {
 			AllowTools: []string{"read_file", "list_directory"},
 		}},
 	}
-	e := policy.New(servers)
+	e := policy.New(servers, nil)
 
-	result := e.Evaluate("fs", makeRequest(mcp.MethodToolsCall, "write_file"))
+	result := e.Evaluate("fs", "", makeRequest(mcp.MethodToolsCall, "write_file"))
 	if result.Allowed {
 		t.Fatal("expected denied for tool not in allow list")
 	}
@@ -158,7 +158,7 @@ func TestEvaluate_NonToolsCall_AlwaysAllowed(t *testing.T) {
 			DenyTools:  []string{"write_file"},
 		}},
 	}
-	e := policy.New(servers)
+	e := policy.New(servers, nil)
 
 	methods := []string{
 		mcp.MethodToolsList, mcp.MethodInitialize, mcp.MethodPing,
@@ -166,7 +166,7 @@ func TestEvaluate_NonToolsCall_AlwaysAllowed(t *testing.T) {
 		mcp.MethodPromptGet, mcp.MethodPromptList,
 	}
 	for _, m := range methods {
-		result := e.Evaluate("fs", makeRequest(m, ""))
+		result := e.Evaluate("fs", "", makeRequest(m, ""))
 		if !result.Allowed {
 			t.Fatalf("expected %s to always be allowed", m)
 		}
@@ -174,11 +174,11 @@ func TestEvaluate_NonToolsCall_AlwaysAllowed(t *testing.T) {
 }
 
 func TestToolAllowed_NoPolicy(t *testing.T) {
-	e := policy.New([]config.ServerConfig{{Name: "s", URL: "http://x"}})
-	if !e.ToolAllowed("s", "anything") {
+	e := policy.New([]config.ServerConfig{{Name: "s", URL: "http://x"}}, nil)
+	if !e.ToolAllowed("s", "", "anything") {
 		t.Fatal("expected tool allowed when no policy is set")
 	}
-	if !e.ToolAllowed("unknown", "anything") {
+	if !e.ToolAllowed("unknown", "", "anything") {
 		t.Fatal("expected tool allowed for unknown server (fail-open)")
 	}
 }
@@ -186,8 +186,8 @@ func TestToolAllowed_NoPolicy(t *testing.T) {
 func TestToolAllowed_ReadOnlyHidesAll(t *testing.T) {
 	e := policy.New([]config.ServerConfig{
 		{Name: "db", URL: "http://x", Policy: &config.Policy{ReadOnly: true}},
-	})
-	if e.ToolAllowed("db", "read_rows") {
+	}, nil)
+	if e.ToolAllowed("db", "", "read_rows") {
 		t.Fatal("read-only server should hide all tools")
 	}
 }
@@ -195,11 +195,11 @@ func TestToolAllowed_ReadOnlyHidesAll(t *testing.T) {
 func TestToolAllowed_DenyList(t *testing.T) {
 	e := policy.New([]config.ServerConfig{
 		{Name: "fs", URL: "http://x", Policy: &config.Policy{DenyTools: []string{"delete_file"}}},
-	})
-	if e.ToolAllowed("fs", "delete_file") {
+	}, nil)
+	if e.ToolAllowed("fs", "", "delete_file") {
 		t.Fatal("denied tool should not be allowed")
 	}
-	if !e.ToolAllowed("fs", "read_file") {
+	if !e.ToolAllowed("fs", "", "read_file") {
 		t.Fatal("non-denied tool should be allowed")
 	}
 }
@@ -207,11 +207,11 @@ func TestToolAllowed_DenyList(t *testing.T) {
 func TestToolAllowed_AllowList(t *testing.T) {
 	e := policy.New([]config.ServerConfig{
 		{Name: "fs", URL: "http://x", Policy: &config.Policy{AllowTools: []string{"read_file"}}},
-	})
-	if !e.ToolAllowed("fs", "read_file") {
+	}, nil)
+	if !e.ToolAllowed("fs", "", "read_file") {
 		t.Fatal("allow-listed tool should be allowed")
 	}
-	if e.ToolAllowed("fs", "write_file") {
+	if e.ToolAllowed("fs", "", "write_file") {
 		t.Fatal("tool not in allow list should be hidden")
 	}
 }
@@ -225,14 +225,14 @@ func TestEvaluate_MultipleServers(t *testing.T) {
 			ReadOnly: true,
 		}},
 	}
-	e := policy.New(servers)
+	e := policy.New(servers, nil)
 
-	result := e.Evaluate("fs", makeRequest(mcp.MethodToolsCall, "delete_file"))
+	result := e.Evaluate("fs", "", makeRequest(mcp.MethodToolsCall, "delete_file"))
 	if result.Allowed {
 		t.Fatal("expected denied on fs")
 	}
 
-	result = e.Evaluate("db", makeRequest(mcp.MethodToolsCall, "delete_file"))
+	result = e.Evaluate("db", "", makeRequest(mcp.MethodToolsCall, "delete_file"))
 	if result.Allowed {
 		t.Fatal("expected denied on read-only db")
 	}

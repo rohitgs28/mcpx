@@ -15,6 +15,10 @@ import (
 
 type Engine struct {
 	policies map[string]*compiledPolicy
+	// clients maps client name -> server name -> override policy. The
+	// effective decision intersects server policy and override: both must
+	// allow. A client without an entry gets the server baseline.
+	clients map[string]map[string]*compiledPolicy
 }
 
 // compiledPolicy pairs a config policy with its pre-compiled argument rules
@@ -29,12 +33,23 @@ type compiledArgRule struct {
 	re *regexp.Regexp
 }
 
-func New(servers []config.ServerConfig) *Engine {
+func New(servers []config.ServerConfig, clients map[string]config.ClientConfig) *Engine {
 	policies := make(map[string]*compiledPolicy)
 	for _, s := range servers {
 		policies[s.Name] = compile(s.Policy)
 	}
-	return &Engine{policies: policies}
+	var cc map[string]map[string]*compiledPolicy
+	if len(clients) > 0 {
+		cc = make(map[string]map[string]*compiledPolicy, len(clients))
+		for name, c := range clients {
+			m := make(map[string]*compiledPolicy, len(c.Servers))
+			for srv, p := range c.Servers {
+				m[srv] = compile(p)
+			}
+			cc[name] = m
+		}
+	}
+	return &Engine{policies: policies, clients: cc}
 }
 
 // compile pre-compiles a policy's argument rules. Invalid regexes cannot
@@ -67,12 +82,30 @@ type Result struct {
 	Reason  string
 }
 
-func (e *Engine) Evaluate(serverName string, req *mcp.Request) Result {
-	cp, ok := e.policies[serverName]
-	if !ok || cp == nil {
-		return Result{Allowed: true}
+// Evaluate decides whether a request from the named client (may be "" when
+// auth provides no identity) is allowed on a server. The server policy and
+// the client's override must BOTH allow it.
+func (e *Engine) Evaluate(serverName, client string, req *mcp.Request) Result {
+	if cp := e.policies[serverName]; cp != nil {
+		if res := evalPolicy(cp, serverName, req); !res.Allowed {
+			return res
+		}
 	}
-	return evalPolicy(cp, serverName, req)
+	if cp := e.clientPolicy(client, serverName); cp != nil {
+		if res := evalPolicy(cp, serverName, req); !res.Allowed {
+			res.Reason = fmt.Sprintf("client %q: %s", client, res.Reason)
+			return res
+		}
+	}
+	return Result{Allowed: true}
+}
+
+// clientPolicy returns the client's override for a server, or nil.
+func (e *Engine) clientPolicy(client, serverName string) *compiledPolicy {
+	if client == "" {
+		return nil
+	}
+	return e.clients[client][serverName]
 }
 
 // evalPolicy applies one policy to a request: read-only mode, deny list,
@@ -176,15 +209,21 @@ func normalize(v any) (string, bool) {
 	}
 }
 
-// ToolAllowed reports whether a named tool may be called on a server under the
-// configured policy. It mirrors the tool-level decision in Evaluate and is used
+// ToolAllowed reports whether a named tool may be called on a server by the
+// named client. It mirrors the tool-level decision in Evaluate and is used
 // to filter tools/list responses so clients never see tools they cannot call.
 // A read-only server hides all tools, since every tools/call on it is blocked.
 // Argument rules do not affect visibility: a tool that is callable with the
 // right arguments stays listed.
-func (e *Engine) ToolAllowed(serverName, tool string) bool {
-	cp, ok := e.policies[serverName]
-	if !ok || cp == nil {
+func (e *Engine) ToolAllowed(serverName, client, tool string) bool {
+	if !toolAllowedBy(e.policies[serverName], tool) {
+		return false
+	}
+	return toolAllowedBy(e.clientPolicy(client, serverName), tool)
+}
+
+func toolAllowedBy(cp *compiledPolicy, tool string) bool {
+	if cp == nil {
 		return true
 	}
 	policy := cp.cfg

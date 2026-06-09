@@ -230,7 +230,7 @@ func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store
 	// need the parsed MCP message (server, method, tool), which the proxy
 	// already extracts when routing. The remaining concerns (auth, rate
 	// limiting, metrics, CORS) are HTTP-level and wrap the gateway.
-	pe := policy.New(cfg.Servers)
+	pe := policy.New(cfg.Servers, cfg.Clients)
 
 	auditCfg := config.AuditConfig{}
 	if cfg.Audit != nil {

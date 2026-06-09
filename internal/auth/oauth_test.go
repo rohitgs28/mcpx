@@ -76,8 +76,55 @@ func newValidator(jwksURI string) *auth.OAuthValidator {
 func TestOAuth_ValidToken(t *testing.T) {
 	priv, jwks := jwksServer(t)
 	v := newValidator(jwks)
-	if err := v.Validate(signToken(t, priv, validClaims())); err != nil {
+	if _, err := v.Validate(signToken(t, priv, validClaims()), ""); err != nil {
 		t.Fatalf("expected valid token to pass, got %v", err)
+	}
+}
+
+func TestOAuth_IdentityFromClaims(t *testing.T) {
+	priv, jwks := jwksServer(t)
+	v := newValidator(jwks)
+
+	c := validClaims()
+	c["sub"] = "user-42"
+	c["client_name"] = "svc-batch"
+
+	// Default claim is sub.
+	id, err := v.Validate(signToken(t, priv, c), "")
+	if err != nil || id != "user-42" {
+		t.Fatalf("default claim: id = %q, err %v; want user-42", id, err)
+	}
+	// Custom identity claim.
+	id, err = v.Validate(signToken(t, priv, c), "client_name")
+	if err != nil || id != "svc-batch" {
+		t.Fatalf("custom claim: id = %q, err %v; want svc-batch", id, err)
+	}
+	// Missing claim yields empty identity but no error.
+	noSub := validClaims()
+	id, err = v.Validate(signToken(t, priv, noSub), "")
+	if err != nil || id != "" {
+		t.Fatalf("missing claim: id = %q, err %v; want empty", id, err)
+	}
+}
+
+func TestOAuth_MiddlewarePutsIdentityInContext(t *testing.T) {
+	priv, jwks := jwksServer(t)
+	cfg := config.AuthConfig{
+		Enabled: true, Type: "oauth",
+		OAuth: &config.OAuthConfig{Resource: testResource, JWKSURI: jwks, Issuer: testIssuer},
+	}
+	var got string
+	h := auth.Middleware(cfg)(clientCapture(&got))
+
+	c := validClaims()
+	c["sub"] = "user-42"
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+signToken(t, priv, c))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || got != "user-42" {
+		t.Fatalf("status = %d, client = %q; want 200, user-42", rec.Code, got)
 	}
 }
 
@@ -86,7 +133,7 @@ func TestOAuth_WrongAudienceRejected(t *testing.T) {
 	v := newValidator(jwks)
 	c := validClaims()
 	c["aud"] = "https://some-other-resource.example.com"
-	if err := v.Validate(signToken(t, priv, c)); err == nil {
+	if _, err := v.Validate(signToken(t, priv, c), ""); err == nil {
 		t.Fatal("expected token with wrong audience to be rejected (RFC 8707)")
 	}
 }
@@ -96,7 +143,7 @@ func TestOAuth_ExpiredRejected(t *testing.T) {
 	v := newValidator(jwks)
 	c := validClaims()
 	c["exp"] = time.Now().Add(-time.Hour).Unix()
-	if err := v.Validate(signToken(t, priv, c)); err == nil {
+	if _, err := v.Validate(signToken(t, priv, c), ""); err == nil {
 		t.Fatal("expected expired token to be rejected")
 	}
 }
@@ -106,7 +153,7 @@ func TestOAuth_WrongIssuerRejected(t *testing.T) {
 	v := newValidator(jwks)
 	c := validClaims()
 	c["iss"] = "https://evil-issuer.example.com"
-	if err := v.Validate(signToken(t, priv, c)); err == nil {
+	if _, err := v.Validate(signToken(t, priv, c), ""); err == nil {
 		t.Fatal("expected token with wrong issuer to be rejected")
 	}
 }
@@ -116,7 +163,7 @@ func TestOAuth_BadSignatureRejected(t *testing.T) {
 	v := newValidator(jwks)
 	// Sign with a different key than the one published in the JWKS.
 	other, _ := rsa.GenerateKey(rand.Reader, 2048)
-	if err := v.Validate(signToken(t, other, validClaims())); err == nil {
+	if _, err := v.Validate(signToken(t, other, validClaims()), ""); err == nil {
 		t.Fatal("expected token signed by an unknown key to be rejected")
 	}
 }

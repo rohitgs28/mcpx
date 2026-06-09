@@ -21,7 +21,7 @@ func strPtr(s string) *string { return &s }
 func argEngine(rules map[string]config.ToolRule) *policy.Engine {
 	return policy.New([]config.ServerConfig{
 		{Name: "srv", URL: "http://localhost:3000", Policy: &config.Policy{ToolRules: rules}},
-	})
+	}, nil)
 }
 
 func TestEvaluate_ArgRules(t *testing.T) {
@@ -72,7 +72,7 @@ func TestEvaluate_ArgRules(t *testing.T) {
 	e := argEngine(rules)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			res := e.Evaluate("srv", makeCallWithArgs(tt.tool, tt.args))
+			res := e.Evaluate("srv", "", makeCallWithArgs(tt.tool, tt.args))
 			if res.Allowed != tt.wantAllow {
 				t.Fatalf("Allowed = %v (reason %q), want %v", res.Allowed, res.Reason, tt.wantAllow)
 			}
@@ -93,15 +93,15 @@ func TestEvaluate_ArgRulesAfterAllowList(t *testing.T) {
 				"read_file": {Args: map[string]config.ArgRule{"path": {Prefix: "/data/"}}},
 			},
 		}},
-	})
+	}, nil)
 
-	if res := e.Evaluate("srv", makeCallWithArgs("read_file", map[string]any{"path": "/data/x"})); !res.Allowed {
+	if res := e.Evaluate("srv", "", makeCallWithArgs("read_file", map[string]any{"path": "/data/x"})); !res.Allowed {
 		t.Errorf("allow-listed tool with valid args should pass, got %q", res.Reason)
 	}
-	if res := e.Evaluate("srv", makeCallWithArgs("read_file", map[string]any{"path": "/tmp/x"})); res.Allowed {
+	if res := e.Evaluate("srv", "", makeCallWithArgs("read_file", map[string]any{"path": "/tmp/x"})); res.Allowed {
 		t.Error("allow-listed tool with violating args must still be denied")
 	}
-	if res := e.Evaluate("srv", makeCallWithArgs("other_tool", nil)); res.Allowed {
+	if res := e.Evaluate("srv", "", makeCallWithArgs("other_tool", nil)); res.Allowed {
 		t.Error("tool outside allow list must be denied regardless of rules")
 	}
 }
@@ -112,7 +112,7 @@ func TestToolAllowed_IgnoresArgRules(t *testing.T) {
 	e := argEngine(map[string]config.ToolRule{
 		"read_file": {Args: map[string]config.ArgRule{"path": {Prefix: "/data/", Required: true}}},
 	})
-	if !e.ToolAllowed("srv", "read_file") {
+	if !e.ToolAllowed("srv", "", "read_file") {
 		t.Error("tool with arg rules must stay visible in tools/list")
 	}
 }

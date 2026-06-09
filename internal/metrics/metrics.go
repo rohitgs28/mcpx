@@ -87,9 +87,15 @@ func (c *Collector) RecordRequest(server, method string, status int, duration ti
 	c.mu.Unlock()
 }
 
-// RecordToolCall records a tool invocation and its policy decision.
-func (c *Collector) RecordToolCall(server, tool, decision string) {
+// RecordToolCall records a tool invocation and its policy decision. The
+// client label is omitted when empty (auth disabled or identity-less);
+// cardinality stays bounded because clients are config-enumerated or a
+// small set of OAuth subjects.
+func (c *Collector) RecordToolCall(server, tool, decision, client string) {
 	label := fmt.Sprintf("server=%q,tool=%q,decision=%q", server, tool, decision)
+	if client != "" {
+		label = fmt.Sprintf("server=%q,tool=%q,decision=%q,client=%q", server, tool, decision, client)
+	}
 	c.getOrCreateCounter(c.toolCallsTotal, label).Add(1)
 
 	policyLabel := fmt.Sprintf("server=%q,decision=%q", server, decision)

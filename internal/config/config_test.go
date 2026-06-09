@@ -194,6 +194,97 @@ auth:
 	}
 }
 
+func TestValidateAuthClients(t *testing.T) {
+	clientsOnly := `
+servers:
+  - name: test
+    url: http://localhost:3001
+auth:
+  enabled: true
+  type: bearer
+  clients:
+    - { name: ci-bot, token: tok-ci }
+    - { name: analyst, token: tok-an }
+`
+	cfg, err := loadFromStringErr(clientsOnly)
+	if err != nil {
+		t.Fatalf("bearer with clients (no token) should be valid: %v", err)
+	}
+	if len(cfg.Auth.Clients) != 2 || cfg.Auth.Clients[0].Name != "ci-bot" {
+		t.Errorf("clients not parsed: %+v", cfg.Auth.Clients)
+	}
+
+	dup := `
+servers:
+  - name: test
+    url: http://localhost:3001
+auth:
+  enabled: true
+  type: bearer
+  clients:
+    - { name: ci-bot, token: a }
+    - { name: ci-bot, token: b }
+`
+	if _, err := loadFromStringErr(dup); err == nil {
+		t.Error("expected duplicate client names to be rejected")
+	}
+
+	missingToken := `
+servers:
+  - name: test
+    url: http://localhost:3001
+auth:
+  enabled: true
+  type: api_key
+  clients:
+    - { name: ci-bot }
+`
+	if _, err := loadFromStringErr(missingToken); err == nil {
+		t.Error("expected credential without token to be rejected")
+	}
+}
+
+func TestValidateClientPolicies(t *testing.T) {
+	valid := `
+servers:
+  - name: fs
+    url: http://localhost:3001
+clients:
+  ci-bot:
+    servers:
+      fs:
+        allow_tools: [read_file]
+        tool_rules:
+          read_file:
+            args:
+              path: { prefix: "/ci/" }
+`
+	cfg, err := loadFromStringErr(valid)
+	if err != nil {
+		t.Fatalf("valid clients section rejected: %v", err)
+	}
+	if cfg.Clients["ci-bot"].Servers["fs"].AllowTools[0] != "read_file" {
+		t.Errorf("client policy not parsed: %+v", cfg.Clients)
+	}
+
+	badRule := `
+servers:
+  - name: fs
+    url: http://localhost:3001
+clients:
+  ci-bot:
+    servers:
+      fs:
+        tool_rules:
+          read_file:
+            args:
+              path: { regex: "([" }
+`
+	if _, err := loadFromStringErr(badRule); err == nil {
+		t.Error("expected invalid regex in client policy to be rejected")
+	}
+}
+
 func TestValidateRateLimitRPS(t *testing.T) {
 	yaml := `
 servers:

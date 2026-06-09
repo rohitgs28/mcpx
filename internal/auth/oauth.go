@@ -43,8 +43,9 @@ func NewOAuthValidator(cfg config.OAuthConfig) *OAuthValidator {
 }
 
 // Validate verifies a bearer token's signature, expiry, issuer (if configured),
-// and audience. It returns nil only when the token is valid for this resource.
-func (v *OAuthValidator) Validate(tokenStr string) error {
+// and audience. On success it returns the client identity read from the
+// identityClaim ("" when the claim is absent or not a string).
+func (v *OAuthValidator) Validate(tokenStr, identityClaim string) (string, error) {
 	opts := []jwt.ParserOption{
 		jwt.WithValidMethods([]string{"RS256"}),
 		jwt.WithAudience(v.cfg.Resource), // RFC 8707 audience binding
@@ -53,8 +54,19 @@ func (v *OAuthValidator) Validate(tokenStr string) error {
 	if v.cfg.Issuer != "" {
 		opts = append(opts, jwt.WithIssuer(v.cfg.Issuer))
 	}
-	_, err := jwt.Parse(tokenStr, v.keyfunc, opts...)
-	return err
+	tok, err := jwt.Parse(tokenStr, v.keyfunc, opts...)
+	if err != nil {
+		return "", err
+	}
+	if identityClaim == "" {
+		identityClaim = "sub"
+	}
+	if claims, ok := tok.Claims.(jwt.MapClaims); ok {
+		if id, ok := claims[identityClaim].(string); ok {
+			return id, nil
+		}
+	}
+	return "", nil
 }
 
 func (v *OAuthValidator) keyfunc(token *jwt.Token) (any, error) {
