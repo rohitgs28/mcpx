@@ -125,7 +125,9 @@ func main() {
 		// strictly better than leaking a handle on every reload.
 		auditMu.Lock()
 		if currentAudit != nil {
-			currentAudit.Close()
+			if err := currentAudit.Close(); err != nil {
+				slog.Warn("failed to close retired audit logger", "error", err)
+			}
 		}
 		currentAudit = newAudit
 		auditMu.Unlock()
@@ -203,7 +205,9 @@ func main() {
 
 	auditMu.Lock()
 	if currentAudit != nil {
-		currentAudit.Close()
+		if err := currentAudit.Close(); err != nil {
+			slog.Warn("failed to close audit logger", "error", err)
+		}
 	}
 	auditMu.Unlock()
 

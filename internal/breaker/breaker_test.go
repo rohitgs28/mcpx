@@ -130,7 +130,8 @@ func TestManager_PerServerIsolation(t *testing.T) {
 	if m.Get("b").State() != StateClosed {
 		t.Fatal("server b must be unaffected by server a's failures")
 	}
-	if m.Get("a") != m.Get("a") {
+	first, second := m.Get("a"), m.Get("a")
+	if first != second {
 		t.Fatal("Get must return the same breaker for the same server")
 	}
 }
