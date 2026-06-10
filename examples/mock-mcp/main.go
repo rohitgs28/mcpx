@@ -88,7 +88,7 @@ func handle(w http.ResponseWriter, r *http.Request) {
 		var p struct {
 			Name string `json:"name"`
 		}
-		json.Unmarshal(req.Params, &p)
+		_ = json.Unmarshal(req.Params, &p)
 		result = map[string]any{
 			"content": []map[string]string{{"type": "text", "text": "mock-mcp executed tool: " + p.Name}},
 		}

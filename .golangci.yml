@@ -1,0 +1,27 @@
+version: "2"
+
+linters:
+  # Standard set: errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  settings:
+    errcheck:
+      # Error returns that are deliberately ignored throughout the gateway:
+      # failures writing an HTTP response can't be reported to the client
+      # anyway, and bytes/strings builders never fail.
+      exclude-functions:
+        - (net/http.ResponseWriter).Write
+        - (*encoding/json.Encoder).Encode
+        - io.WriteString
+        - (*strings.Builder).WriteString
+        - (io.Closer).Close
+        - fmt.Print
+        - fmt.Println
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+  exclusions:
+    # Standard library response-writing patterns in tests don't need checks.
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
