@@ -171,7 +171,61 @@ policy:
   deny_tools: [write_file, delete_file]
 ```
 
-With `inspection.filter_tools_list: true`, denied tools are also stripped from `tools/list` responses, so the model never even sees a tool it cannot call.
+With `inspection.filter_tools_list: true`, denied tools are also stripped from `tools/list` responses, so the model never even sees a tool it cannot call. Filtering is per client when auth provides an identity.
+
+### 🎯 Argument-Level Rules
+
+Constrain *what* a tool may be called with, not just whether it may be called. Constraints (`equals`, `one_of`, `prefix`, `suffix`, `regex`, `required`) are ANDed per argument and evaluated deterministically — violations return a `403` naming the violated rule.
+
+```yaml
+policy:
+  tool_rules:
+    read_file:
+      args:
+        path: { prefix: "/data/" }
+    query:
+      args:
+        sql: { regex: "^SELECT ", required: true }
+```
+
+Scalar values compare as strings (bools and numbers normalized); a rule that targets a non-scalar value fails closed. `prefix` is a literal check — no path canonicalization.
+
+### 👥 Per-Client Policies
+
+Give each caller an identity and a policy. Bearer/API-key auth accepts multiple named credentials; OAuth derives the identity from a JWT claim (`identity_claim`, default `sub`). The effective decision is the **intersection** of the server policy and the client's override — both must allow a call, so overrides can only restrict, never widen, the baseline.
+
+```yaml
+auth:
+  enabled: true
+  type: bearer
+  clients:
+    - { name: ci-bot,  token: "ci-secret" }
+    - { name: analyst, token: "analyst-secret" }
+
+clients:
+  ci-bot:
+    servers:
+      filesystem:
+        allow_tools: [read_file]
+```
+
+Each client sees its own filtered `tools/list`, audit entries carry the client name, and the tool-call metric gains a `client` label.
+
+### 📡 Streaming (SSE) Pass-Through
+
+MCP Streamable HTTP responses (`Content-Type: text/event-stream`) stream through the gateway unbuffered — events reach the client as the backend emits them, and streams may outlive the server's write timeout. Request-side auth, policy, and rate limiting apply as usual. To keep the `tools/list` security guarantee, when inspection is enabled the gateway pins `tools/list` requests to JSON responses (rewrites `Accept`), so integrity pinning and list filtering cannot be bypassed by a streaming response.
+
+### ⚡ Circuit Breaker
+
+After a configurable number of consecutive backend failures (transport errors or `5xx`), the gateway fails fast with `503` instead of queueing requests against a dead upstream. After a cooldown, limited probe requests test recovery. State survives config hot-reloads.
+
+```yaml
+circuit_breaker:
+  enabled: true
+  failure_threshold: 5
+  cooldown: 30s
+  half_open_max: 1
+```
 
 ### 🔎 Tool Integrity Pinning
 
@@ -199,10 +253,12 @@ Built-in `/metrics` endpoint exposes request counts, latencies, tool usage, poli
 
 ```
 mcpx_requests_total{server="filesystem",method="tools/call",status_code="2xx"} 42
-mcpx_tool_calls_total{server="filesystem",tool="read_file",decision="allow"} 38
+mcpx_tool_calls_total{server="filesystem",tool="read_file",decision="allow",client="ci-bot"} 38
 mcpx_request_duration_ms_bucket{server="filesystem",le="50"} 35
 mcpx_auth_failures_total 3
 mcpx_rate_limit_hits_total 1
+mcpx_breaker_trips_total 1
+mcpx_breaker_state{server="database"} 1
 ```
 
 ### 🏥 Deep Health Checks
@@ -221,7 +277,7 @@ mcpx_rate_limit_hits_total 1
 
 ### 📝 Audit Logging
 
-Every request is logged with server name, method, tool name, client IP, policy decision, and latency. JSON output for your existing log infrastructure.
+Every request is logged with server name, method, tool name, authenticated client, client IP, policy decision, and latency. JSON output for your existing log infrastructure. Every response carries an `X-Request-ID` for correlation, and all gateway-generated errors share a consistent JSON envelope (`{"error":{"code":...,"message":...}}`, or a JSON-RPC error when the request carried a parseable message).
 
 ### 🌐 CORS Support
 
@@ -253,8 +309,11 @@ internal/
 ├── auth/oauth.go              JWT/JWKS validation + RFC 9728 metadata
 ├── ratelimit/ratelimit.go     Global and per-tool rate limiting
 ├── audit/audit.go             Structured audit logging (slog + JSON)
-├── policy/policy.go           Tool-level allow/deny policy engine
+├── policy/policy.go           Tool/argument/client policy engine
 ├── integrity/integrity.go     Full-schema tool pinning (rug-pull detection)
+├── breaker/breaker.go         Per-backend circuit breaker
+├── httperr/httperr.go         Consistent JSON error envelopes
+├── middleware/requestid.go    X-Request-ID propagation
 ├── metrics/metrics.go         Prometheus-compatible metrics (no deps)
 ├── health/health.go           Deep health checking with backend probes
 └── cors/cors.go               CORS middleware for browser clients
@@ -275,7 +334,10 @@ See [ROADMAP.md](ROADMAP.md) for the full plan. Key upcoming work:
 - [x] OAuth 2.1 authentication (audience validation + RFC 9728 metadata)
 - [x] Full-schema tool integrity pinning (rug-pull detection)
 - [x] Hot config reload (SIGHUP + watch)
-- [ ] SSE/WebSocket transport proxying
+- [x] SSE / Streamable HTTP pass-through
+- [x] Argument-level and per-client policies
+- [x] Per-backend circuit breaker
+- [ ] WebSocket transport proxying
 - [ ] Stdio transport (spawn local MCP servers)
 - [ ] OpenTelemetry tracing
 - [ ] Web dashboard
