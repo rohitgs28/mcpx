@@ -23,6 +23,7 @@ type Entry struct {
 	Server     string    `json:"server"`
 	Method     string    `json:"method"`
 	Tool       string    `json:"tool,omitempty"`
+	Client     string    `json:"client,omitempty"` // authenticated client identity
 	ClientIP   string    `json:"client_ip,omitempty"`
 	Allowed    bool      `json:"allowed"`
 	Reason     string    `json:"reason,omitempty"`
@@ -69,6 +70,9 @@ func (l *Logger) Log(entry Entry) {
 	a := []any{"server", entry.Server, "method", entry.Method, "allowed", entry.Allowed}
 	if entry.Tool != "" {
 		a = append(a, "tool", entry.Tool)
+	}
+	if entry.Client != "" {
+		a = append(a, "client", entry.Client)
 	}
 	if entry.ClientIP != "" {
 		a = append(a, "client_ip", entry.ClientIP)

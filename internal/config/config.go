@@ -7,19 +7,60 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
+// Duration accepts Go duration strings ("30s", "2m") in YAML.
+type Duration time.Duration
+
+func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
+	var s string
+	if err := value.Decode(&s); err != nil {
+		return err
+	}
+	dd, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("invalid duration %q (use Go syntax, e.g. \"30s\"): %w", s, err)
+	}
+	*d = Duration(dd)
+	return nil
+}
+
 // Config is the top-level gateway configuration.
 type Config struct {
-	Listen     string            `yaml:"listen"`
-	Servers    []ServerConfig    `yaml:"servers"`
-	Auth       *AuthConfig       `yaml:"auth"`
-	Audit      *AuditConfig      `yaml:"audit"`
-	RateLimit  *RateLimitConfig  `yaml:"rate_limit"`
-	CORS       *CORSConfig       `yaml:"cors"`
-	Inspection *InspectionConfig `yaml:"inspection"`
+	Listen     string                  `yaml:"listen"`
+	Servers    []ServerConfig          `yaml:"servers"`
+	Auth       *AuthConfig             `yaml:"auth"`
+	Audit      *AuditConfig            `yaml:"audit"`
+	RateLimit  *RateLimitConfig        `yaml:"rate_limit"`
+	CORS       *CORSConfig             `yaml:"cors"`
+	Inspection *InspectionConfig       `yaml:"inspection"`
+	Clients    map[string]ClientConfig `yaml:"clients"` // per-client policy overrides, keyed by client name
+	// CircuitBreaker fails fast per backend after repeated upstream failures.
+	// Settings are read once at startup (like inspection.tool_integrity) so
+	// breaker state survives config hot-reloads; changing them needs a restart.
+	CircuitBreaker *CircuitBreakerConfig `yaml:"circuit_breaker"`
+}
+
+// CircuitBreakerConfig tunes the per-backend circuit breaker. Zero values
+// take defaults (threshold 5, cooldown 30s, half_open_max 1).
+type CircuitBreakerConfig struct {
+	Enabled          bool     `yaml:"enabled"`
+	FailureThreshold int      `yaml:"failure_threshold"` // consecutive failures that open the breaker
+	Cooldown         Duration `yaml:"cooldown"`          // open -> half-open delay
+	HalfOpenMax      int      `yaml:"half_open_max"`     // probes admitted while half-open
+}
+
+// ClientConfig narrows what an authenticated client may do, per server.
+// The effective decision is the intersection of the server policy and the
+// client's override: BOTH must allow a call. Client names come from auth
+// (named credentials for bearer/api_key, the identity claim for OAuth);
+// a client with no entry here gets the server baseline policy.
+type ClientConfig struct {
+	Servers map[string]*Policy `yaml:"servers"`
 }
 
 // InspectionConfig controls response-level inspection of tools/list payloads.
@@ -36,24 +77,60 @@ type InspectionConfig struct {
 type ServerConfig struct {
 	Name      string  `yaml:"name"`
 	URL       string  `yaml:"url"`
-	Transport string  `yaml:"transport"` // "http", "sse", "websocket"
+	Transport string  `yaml:"transport"` // "http" (default) or its alias "sse"; SSE streams are auto-detected per response
 	Policy    *Policy `yaml:"policy"`
 }
 
 // Policy defines tool-level access control for a server.
 type Policy struct {
-	ReadOnly   bool     `yaml:"read_only"`
-	AllowTools []string `yaml:"allow_tools"`
-	DenyTools  []string `yaml:"deny_tools"`
+	ReadOnly   bool                `yaml:"read_only"`
+	AllowTools []string            `yaml:"allow_tools"`
+	DenyTools  []string            `yaml:"deny_tools"`
+	ToolRules  map[string]ToolRule `yaml:"tool_rules"` // per-tool argument constraints
+}
+
+// ToolRule constrains the arguments a tool may be called with.
+type ToolRule struct {
+	Args map[string]ArgRule `yaml:"args"`
+}
+
+// ArgRule is a deterministic constraint on a single top-level tool argument.
+// Multiple constraints on the same argument are ANDed. Rules only constrain
+// the arguments they name: an absent argument passes unless Required is set.
+// Scalar values are compared as strings (bools as "true"/"false", numbers in
+// their shortest decimal form); a rule that targets a non-scalar value
+// (object, array, null) denies the call — what cannot be compared cannot be
+// allowed. Prefix is a literal string check: no path canonicalization is
+// performed.
+type ArgRule struct {
+	Equals   *string  `yaml:"equals"` // pointer so "" is distinguishable from unset
+	OneOf    []string `yaml:"one_of"`
+	Prefix   string   `yaml:"prefix"`
+	Suffix   string   `yaml:"suffix"`
+	Regex    string   `yaml:"regex"`
+	Required bool     `yaml:"required"`
 }
 
 // AuthConfig defines authentication settings.
 type AuthConfig struct {
 	Enabled bool         `yaml:"enabled"`
 	Type    string       `yaml:"type"`   // "bearer", "api_key", "none", "oauth"
-	Token   string       `yaml:"token"`  // for bearer auth
+	Token   string       `yaml:"token"`  // single shared token for bearer/api_key (identifies as client "default")
 	Header  string       `yaml:"header"` // for api_key auth (default: X-API-Key)
 	OAuth   *OAuthConfig `yaml:"oauth"`  // for oauth (OAuth 2.1 resource server)
+	// Clients lists named credentials for bearer/api_key auth so requests
+	// carry a client identity (used by per-client policies and audit logs).
+	// May be combined with Token, which matches as client "default".
+	Clients []ClientCredential `yaml:"clients"`
+	// IdentityClaim is the JWT claim used as the client identity for oauth
+	// (default "sub").
+	IdentityClaim string `yaml:"identity_claim"`
+}
+
+// ClientCredential is a named bearer/api_key token.
+type ClientCredential struct {
+	Name  string `yaml:"name"`
+	Token string `yaml:"token"`
 }
 
 // OAuthConfig configures the gateway as an OAuth 2.1 protected resource server,
@@ -136,8 +213,17 @@ func (c *Config) Validate() error {
 		if srv.URL == "" {
 			return fmt.Errorf("server %q: url is required", srv.Name)
 		}
-		if srv.Transport == "" {
+		switch srv.Transport {
+		case "":
 			c.Servers[i].Transport = "http"
+		case "http", "sse":
+			// valid; "sse" is an alias of "http" — streaming responses are
+			// detected per-response via Content-Type, not per-server.
+		default:
+			return fmt.Errorf("server %q: transport must be \"http\" or \"sse\" (got %q)", srv.Name, srv.Transport)
+		}
+		if err := validatePolicy(srv.Policy, fmt.Sprintf("server %q", srv.Name)); err != nil {
+			return err
 		}
 	}
 
@@ -148,8 +234,21 @@ func (c *Config) Validate() error {
 		default:
 			return fmt.Errorf("auth.type must be \"bearer\", \"api_key\", \"oauth\", or \"none\" (got %q)", c.Auth.Type)
 		}
-		if c.Auth.Type == "bearer" && c.Auth.Token == "" {
-			return fmt.Errorf("auth.token is required when auth.type is \"bearer\"")
+		if (c.Auth.Type == "bearer" || c.Auth.Type == "api_key") && c.Auth.Token == "" && len(c.Auth.Clients) == 0 {
+			return fmt.Errorf("auth.token or auth.clients is required when auth.type is %q", c.Auth.Type)
+		}
+		seen := make(map[string]bool, len(c.Auth.Clients))
+		for i, cc := range c.Auth.Clients {
+			if cc.Name == "" {
+				return fmt.Errorf("auth.clients[%d]: name is required", i)
+			}
+			if cc.Token == "" {
+				return fmt.Errorf("auth.clients[%d] (%q): token is required", i, cc.Name)
+			}
+			if seen[cc.Name] {
+				return fmt.Errorf("auth.clients: duplicate client name %q", cc.Name)
+			}
+			seen[cc.Name] = true
 		}
 		if c.Auth.Type == "oauth" {
 			if c.Auth.OAuth == nil {
@@ -182,5 +281,52 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if cb := c.CircuitBreaker; cb != nil && cb.Enabled {
+		if cb.FailureThreshold < 0 {
+			return fmt.Errorf("circuit_breaker.failure_threshold must not be negative (got %d)", cb.FailureThreshold)
+		}
+		if cb.Cooldown < 0 {
+			return fmt.Errorf("circuit_breaker.cooldown must not be negative")
+		}
+		if cb.HalfOpenMax < 0 {
+			return fmt.Errorf("circuit_breaker.half_open_max must not be negative (got %d)", cb.HalfOpenMax)
+		}
+	}
+
+	// Client policy names are deliberately not checked against auth.clients:
+	// OAuth identities (JWT subjects) are not enumerable in config.
+	for name, cc := range c.Clients {
+		if name == "" {
+			return fmt.Errorf("clients: client name must not be empty")
+		}
+		for srv, p := range cc.Servers {
+			if err := validatePolicy(p, fmt.Sprintf("clients.%s.servers.%s", name, srv)); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// validatePolicy checks a policy's tool_rules: every argument rule must carry
+// at least one constraint (which also catches misspelled constraint keys,
+// since those leave the rule empty) and regexes must compile.
+func validatePolicy(p *Policy, where string) error {
+	if p == nil {
+		return nil
+	}
+	for tool, tr := range p.ToolRules {
+		for arg, ar := range tr.Args {
+			if ar.Equals == nil && len(ar.OneOf) == 0 && ar.Prefix == "" && ar.Suffix == "" && ar.Regex == "" && !ar.Required {
+				return fmt.Errorf("%s: tool_rules.%s.args.%s: at least one constraint (equals, one_of, prefix, suffix, regex, required) is required", where, tool, arg)
+			}
+			if ar.Regex != "" {
+				if _, err := regexp.Compile(ar.Regex); err != nil {
+					return fmt.Errorf("%s: tool_rules.%s.args.%s: invalid regex: %w", where, tool, arg, err)
+				}
+			}
+		}
+	}
 	return nil
 }

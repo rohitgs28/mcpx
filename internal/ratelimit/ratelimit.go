@@ -3,7 +3,6 @@
 package ratelimit
 
 import (
-	"encoding/json"
 	"io"
 	"net/http"
 	"sync"
@@ -11,6 +10,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/rohitgs28/mcpx/internal/config"
+	"github.com/rohitgs28/mcpx/internal/httperr"
 	"github.com/rohitgs28/mcpx/internal/mcp"
 )
 
@@ -37,13 +37,13 @@ func (l *Limiter) Middleware() func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if l.global != nil && !l.global.Allow() {
 				w.Header().Set("Retry-After", "1")
-				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
+				httperr.Write(w, http.StatusTooManyRequests, httperr.CodeRateLimited, "rate limit exceeded")
 				return
 			}
 			if l.cfg.PerTool && r.Body != nil {
 				body, err := io.ReadAll(r.Body)
 				if err != nil {
-					http.Error(w, `{"error":"failed to read request"}`, http.StatusBadRequest)
+					httperr.Write(w, http.StatusBadRequest, httperr.CodeBadRequest, "failed to read request")
 					return
 				}
 				r.Body = io.NopCloser(newBytesReader(body))
@@ -51,10 +51,8 @@ func (l *Limiter) Middleware() func(http.Handler) http.Handler {
 				if req != nil && req.Method == mcp.MethodToolsCall {
 					tc, _ := mcp.ParseToolCall(req)
 					if tc != nil && !l.getToolLimiter(tc.Name).Allow() {
-						resp := mcp.NewErrorResponse(req.ID, -32000, "rate limit exceeded for tool: "+tc.Name)
-						w.Header().Set("Content-Type", "application/json")
-						w.WriteHeader(http.StatusTooManyRequests)
-						json.NewEncoder(w).Encode(resp)
+						w.Header().Set("Retry-After", "1")
+						httperr.WriteRPC(w, http.StatusTooManyRequests, req.ID, -32000, "rate limit exceeded for tool: "+tc.Name)
 						return
 					}
 				}

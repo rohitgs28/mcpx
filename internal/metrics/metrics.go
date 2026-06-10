@@ -21,10 +21,12 @@ type Collector struct {
 
 	// Counters
 	requestsTotal   map[string]*atomic.Int64 // label: server,method,status
-	toolCallsTotal  map[string]*atomic.Int64 // label: server,tool,decision
+	toolCallsTotal  map[string]*atomic.Int64 // label: server,tool,decision[,client]
 	policyDecisions map[string]*atomic.Int64 // label: server,decision (allow/deny)
 	authFailures    atomic.Int64
 	rateLimitHits   atomic.Int64
+	breakerTrips    atomic.Int64
+	breakerState    map[string]*atomic.Int64 // label: server; 0 closed, 1 open, 2 half-open
 
 	// Histograms (simplified: count + sum for averages, plus buckets)
 	latencySum     map[string]*atomic.Int64            // microseconds, label: server
@@ -46,6 +48,7 @@ func New() *Collector {
 		requestsTotal:   make(map[string]*atomic.Int64),
 		toolCallsTotal:  make(map[string]*atomic.Int64),
 		policyDecisions: make(map[string]*atomic.Int64),
+		breakerState:    make(map[string]*atomic.Int64),
 		latencySum:      make(map[string]*atomic.Int64),
 		latencyCount:    make(map[string]*atomic.Int64),
 		latencyBuckets:  make(map[string]map[string]*atomic.Int64),
@@ -87,9 +90,15 @@ func (c *Collector) RecordRequest(server, method string, status int, duration ti
 	c.mu.Unlock()
 }
 
-// RecordToolCall records a tool invocation and its policy decision.
-func (c *Collector) RecordToolCall(server, tool, decision string) {
+// RecordToolCall records a tool invocation and its policy decision. The
+// client label is omitted when empty (auth disabled or identity-less);
+// cardinality stays bounded because clients are config-enumerated or a
+// small set of OAuth subjects.
+func (c *Collector) RecordToolCall(server, tool, decision, client string) {
 	label := fmt.Sprintf("server=%q,tool=%q,decision=%q", server, tool, decision)
+	if client != "" {
+		label = fmt.Sprintf("server=%q,tool=%q,decision=%q,client=%q", server, tool, decision, client)
+	}
 	c.getOrCreateCounter(c.toolCallsTotal, label).Add(1)
 
 	policyLabel := fmt.Sprintf("server=%q,decision=%q", server, decision)
@@ -104,6 +113,18 @@ func (c *Collector) RecordAuthFailure() {
 // RecordRateLimitHit increments the rate limit counter.
 func (c *Collector) RecordRateLimitHit() {
 	c.rateLimitHits.Add(1)
+}
+
+// RecordBreakerTrip increments the circuit-breaker trip counter.
+func (c *Collector) RecordBreakerTrip() {
+	c.breakerTrips.Add(1)
+}
+
+// SetBreakerState records a backend's breaker state
+// (0 closed, 1 open, 2 half-open).
+func (c *Collector) SetBreakerState(server string, state int64) {
+	label := fmt.Sprintf("server=%q", server)
+	c.getOrCreateCounter(c.breakerState, label).Store(state)
 }
 
 // SetActiveConnections sets the current number of active connections.
@@ -180,6 +201,16 @@ func (c *Collector) Handler() http.HandlerFunc {
 		b.WriteString("# HELP mcpx_rate_limit_hits_total Total rate limit rejections.\n")
 		b.WriteString("# TYPE mcpx_rate_limit_hits_total counter\n")
 		fmt.Fprintf(&b, "mcpx_rate_limit_hits_total %d\n\n", c.rateLimitHits.Load())
+
+		// Circuit breaker
+		b.WriteString("# HELP mcpx_breaker_trips_total Times a backend circuit breaker opened.\n")
+		b.WriteString("# TYPE mcpx_breaker_trips_total counter\n")
+		fmt.Fprintf(&b, "mcpx_breaker_trips_total %d\n\n", c.breakerTrips.Load())
+
+		b.WriteString("# HELP mcpx_breaker_state Backend breaker state (0 closed, 1 open, 2 half-open).\n")
+		b.WriteString("# TYPE mcpx_breaker_state gauge\n")
+		c.writeCounterMap(&b, "mcpx_breaker_state", c.breakerState)
+		b.WriteString("\n")
 
 		// Latency histograms
 		b.WriteString("# HELP mcpx_request_duration_ms Request latency in milliseconds.\n")

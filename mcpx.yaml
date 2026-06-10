@@ -7,7 +7,7 @@ listen: ":8080"
 servers:
   - name: filesystem
     url: http://localhost:3001
-    transport: http
+    transport: http   # "http" (default); "sse" is an alias — streaming responses are auto-detected
     policy:
       # Only allow read operations
       allow_tools:
@@ -17,6 +17,15 @@ servers:
       deny_tools:
         - write_file
         - delete_file
+      # Argument-level rules: constrain WHAT a tool may be called with.
+      # Constraints per argument (ANDed): equals, one_of, prefix, suffix,
+      # regex, required. Values compare as strings (bools/numbers
+      # normalized); non-scalar values fail closed. prefix is a literal
+      # check — no path canonicalization.
+      tool_rules:
+        read_file:
+          args:
+            path: { prefix: "/data/" }
 
   - name: database
     url: http://localhost:3002
@@ -36,8 +45,29 @@ servers:
 # Authentication
 auth:
   enabled: true
-  type: bearer       # "bearer", "api_key", or "none"
-  token: "your-secret-token-here"
+  type: bearer       # "bearer", "api_key", "oauth", or "none"
+  token: "your-secret-token-here"   # matches as client "default"
+  # Named credentials give each caller an identity for per-client policies,
+  # audit logs, and metrics:
+  # clients:
+  #   - { name: ci-bot,  token: "ci-secret" }
+  #   - { name: analyst, token: "analyst-secret" }
+  # For oauth, the client identity comes from a JWT claim (default "sub"):
+  # identity_claim: sub
+
+# Per-client policy overrides. The effective decision is the INTERSECTION
+# of the server policy and the client's override: both must allow a call.
+# Overrides can only restrict, never widen, the server baseline. Clients
+# without an entry get the server policy as-is.
+# clients:
+#   ci-bot:
+#     servers:
+#       filesystem:
+#         allow_tools: [read_file]
+#         tool_rules:
+#           read_file:
+#             args:
+#               path: { prefix: "/ci/" }
 
 # CORS — required for browser-based MCP clients
 cors:
@@ -79,5 +109,17 @@ inspection:
   #   enforce — log and drop the mutated tool from tools/list
   tool_integrity: warn
   # Strip policy-denied tools from tools/list so clients never see tools they
-  # are not permitted to call.
+  # are not permitted to call. Filtering is per client when auth provides an
+  # identity. Note: when inspection is on, tools/list requests are pinned to
+  # JSON responses (Accept rewritten) so streaming cannot bypass it; all
+  # other SSE responses stream through untouched.
   filter_tools_list: true
+
+# Circuit breaker: fail fast (503) per backend after repeated failures
+# instead of queueing requests against a dead upstream. Settings are read
+# once at startup so breaker state survives config hot-reloads.
+circuit_breaker:
+  enabled: true
+  failure_threshold: 5   # consecutive failures (5xx or transport errors) that open the circuit
+  cooldown: 30s          # how long to stay open before probing recovery
+  half_open_max: 1       # concurrent probe requests while half-open

@@ -26,9 +26,9 @@ func TestRecordRequest(t *testing.T) {
 
 func TestRecordToolCall(t *testing.T) {
 	c := New()
-	c.RecordToolCall("filesystem", "read_file", "allow")
-	c.RecordToolCall("filesystem", "delete_file", "deny")
-	c.RecordToolCall("filesystem", "read_file", "allow")
+	c.RecordToolCall("filesystem", "read_file", "allow", "")
+	c.RecordToolCall("filesystem", "delete_file", "deny", "")
+	c.RecordToolCall("filesystem", "read_file", "allow", "")
 
 	body := getMetrics(t, c)
 

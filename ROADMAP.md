@@ -30,14 +30,14 @@ Make mcpx the simplest, fastest way to secure MCP servers in production. One bin
 - [x] Deep health checks — probe each backend, report individual status and latency
 - [x] CORS middleware — support browser-based MCP clients
 - [x] Request ID propagation — trace requests across gateway and backends
-- [ ] Structured error responses — consistent JSON error format with error codes
+- [x] Structured error responses — consistent JSON error format with error codes
 
 ## Phase 3: Transport Support
 
-- [ ] Server-Sent Events (SSE) proxy — streaming MCP transport
+- [x] Server-Sent Events (SSE) proxy — streaming MCP transport (Streamable HTTP pass-through)
 - [ ] WebSocket proxy — bidirectional streaming MCP transport
 - [ ] Stdio transport — spawn and manage local MCP servers as child processes
-- [ ] Transport auto-detection — route to correct transport based on server config
+- [x] Transport auto-detection — streaming responses detected per response via Content-Type
 
 ## Phase 4: Enterprise Security
 
@@ -47,8 +47,8 @@ Make mcpx the simplest, fastest way to secure MCP servers in production. One bin
 - [x] Tool integrity pinning — full-schema hashing detects rug-pull/mutation (CVE-2025-54136)
 - [x] Tool-list filtering — hide policy-denied tools from `tools/list`
 - [ ] mTLS between gateway and backends
-- [ ] Per-client policies (multi-tenant access control)
-- [ ] Argument-level policy rules (e.g., allow `read_file` only for specific paths)
+- [x] Per-client policies (multi-tenant access control)
+- [x] Argument-level policy rules (e.g., allow `read_file` only for specific paths)
 - [ ] Secret injection — inject credentials into backend requests from a vault
 - [ ] ES256/EdDSA token signature support (RS256 today)
 
@@ -57,8 +57,8 @@ Make mcpx the simplest, fastest way to secure MCP servers in production. One bin
 - [ ] OpenTelemetry tracing integration
 - [ ] Prometheus metrics with Grafana dashboard template
 - [x] Hot config reload (SIGHUP or watch mode)
-- [ ] Graceful shutdown with connection draining
-- [ ] Circuit breaker per backend
+- [x] Graceful shutdown with connection draining
+- [x] Circuit breaker per backend
 - [ ] Request/response caching for idempotent tools
 - [ ] Admin API for runtime config changes
 

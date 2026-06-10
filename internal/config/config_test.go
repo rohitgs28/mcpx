@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadValidConfig(t *testing.T) {
@@ -75,6 +76,95 @@ servers:
 	}
 }
 
+func TestValidateTransport(t *testing.T) {
+	tests := []struct {
+		transport string
+		wantErr   bool
+	}{
+		{"", false},
+		{"http", false},
+		{"sse", false},
+		{"websocket", true},
+		{"stdio", true},
+	}
+	for _, tt := range tests {
+		yaml := `
+servers:
+  - name: test
+    url: http://localhost:3001
+    transport: "` + tt.transport + `"
+`
+		_, err := loadFromStringErr(yaml)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("transport %q: err = %v, wantErr %v", tt.transport, err, tt.wantErr)
+		}
+	}
+}
+
+func TestValidateToolRules(t *testing.T) {
+	valid := `
+servers:
+  - name: fs
+    url: http://localhost:3001
+    policy:
+      tool_rules:
+        read_file:
+          args:
+            path: { prefix: "/data/" }
+            tag: { regex: "^[a-z]+$", required: true }
+`
+	cfg, err := loadFromStringErr(valid)
+	if err != nil {
+		t.Fatalf("valid tool_rules rejected: %v", err)
+	}
+	ar := cfg.Servers[0].Policy.ToolRules["read_file"].Args["path"]
+	if ar.Prefix != "/data/" {
+		t.Errorf("prefix = %q, want /data/", ar.Prefix)
+	}
+
+	badRegex := `
+servers:
+  - name: fs
+    url: http://localhost:3001
+    policy:
+      tool_rules:
+        read_file:
+          args:
+            path: { regex: "([" }
+`
+	if _, err := loadFromStringErr(badRegex); err == nil {
+		t.Error("expected error for invalid regex in tool_rules")
+	}
+
+	emptyRule := `
+servers:
+  - name: fs
+    url: http://localhost:3001
+    policy:
+      tool_rules:
+        read_file:
+          args:
+            path: {}
+`
+	if _, err := loadFromStringErr(emptyRule); err == nil {
+		t.Error("expected error for arg rule with no constraints")
+	}
+
+	typoKey := `
+servers:
+  - name: fs
+    url: http://localhost:3001
+    policy:
+      tool_rules:
+        read_file:
+          args:
+            path: { prefx: "/data/" }
+`
+	if _, err := loadFromStringErr(typoKey); err == nil {
+		t.Error("expected misspelled constraint key to be rejected (rule is empty)")
+	}
+}
+
 func TestValidateAuthType(t *testing.T) {
 	yaml := `
 servers:
@@ -102,6 +192,141 @@ auth:
 	_, err := loadFromStringErr(yaml)
 	if err == nil {
 		t.Error("expected error for missing bearer token")
+	}
+}
+
+func TestValidateAuthClients(t *testing.T) {
+	clientsOnly := `
+servers:
+  - name: test
+    url: http://localhost:3001
+auth:
+  enabled: true
+  type: bearer
+  clients:
+    - { name: ci-bot, token: tok-ci }
+    - { name: analyst, token: tok-an }
+`
+	cfg, err := loadFromStringErr(clientsOnly)
+	if err != nil {
+		t.Fatalf("bearer with clients (no token) should be valid: %v", err)
+	}
+	if len(cfg.Auth.Clients) != 2 || cfg.Auth.Clients[0].Name != "ci-bot" {
+		t.Errorf("clients not parsed: %+v", cfg.Auth.Clients)
+	}
+
+	dup := `
+servers:
+  - name: test
+    url: http://localhost:3001
+auth:
+  enabled: true
+  type: bearer
+  clients:
+    - { name: ci-bot, token: a }
+    - { name: ci-bot, token: b }
+`
+	if _, err := loadFromStringErr(dup); err == nil {
+		t.Error("expected duplicate client names to be rejected")
+	}
+
+	missingToken := `
+servers:
+  - name: test
+    url: http://localhost:3001
+auth:
+  enabled: true
+  type: api_key
+  clients:
+    - { name: ci-bot }
+`
+	if _, err := loadFromStringErr(missingToken); err == nil {
+		t.Error("expected credential without token to be rejected")
+	}
+}
+
+func TestValidateClientPolicies(t *testing.T) {
+	valid := `
+servers:
+  - name: fs
+    url: http://localhost:3001
+clients:
+  ci-bot:
+    servers:
+      fs:
+        allow_tools: [read_file]
+        tool_rules:
+          read_file:
+            args:
+              path: { prefix: "/ci/" }
+`
+	cfg, err := loadFromStringErr(valid)
+	if err != nil {
+		t.Fatalf("valid clients section rejected: %v", err)
+	}
+	if cfg.Clients["ci-bot"].Servers["fs"].AllowTools[0] != "read_file" {
+		t.Errorf("client policy not parsed: %+v", cfg.Clients)
+	}
+
+	badRule := `
+servers:
+  - name: fs
+    url: http://localhost:3001
+clients:
+  ci-bot:
+    servers:
+      fs:
+        tool_rules:
+          read_file:
+            args:
+              path: { regex: "([" }
+`
+	if _, err := loadFromStringErr(badRule); err == nil {
+		t.Error("expected invalid regex in client policy to be rejected")
+	}
+}
+
+func TestValidateCircuitBreaker(t *testing.T) {
+	valid := `
+servers:
+  - name: test
+    url: http://localhost:3001
+circuit_breaker:
+  enabled: true
+  failure_threshold: 5
+  cooldown: 30s
+  half_open_max: 1
+`
+	cfg, err := loadFromStringErr(valid)
+	if err != nil {
+		t.Fatalf("valid circuit_breaker rejected: %v", err)
+	}
+	if d := time.Duration(cfg.CircuitBreaker.Cooldown); d != 30*time.Second {
+		t.Errorf("cooldown = %v, want 30s", d)
+	}
+
+	badDuration := `
+servers:
+  - name: test
+    url: http://localhost:3001
+circuit_breaker:
+  enabled: true
+  cooldown: thirty
+`
+	if _, err := loadFromStringErr(badDuration); err == nil {
+		t.Error("expected invalid duration string to be rejected")
+	}
+
+	negative := `
+servers:
+  - name: test
+    url: http://localhost:3001
+circuit_breaker:
+  enabled: true
+  failure_threshold: -1
+`
+	if _, err := loadFromStringErr(negative); err == nil {
+		t.Error("expected negative failure_threshold to be rejected")
 	}
 }
 

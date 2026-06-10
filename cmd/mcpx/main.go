@@ -21,17 +21,21 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/rohitgs28/mcpx/internal/audit"
 	"github.com/rohitgs28/mcpx/internal/auth"
+	"github.com/rohitgs28/mcpx/internal/breaker"
 	"github.com/rohitgs28/mcpx/internal/config"
 	"github.com/rohitgs28/mcpx/internal/cors"
 	"github.com/rohitgs28/mcpx/internal/health"
+	"github.com/rohitgs28/mcpx/internal/httperr"
 	"github.com/rohitgs28/mcpx/internal/integrity"
 	"github.com/rohitgs28/mcpx/internal/metrics"
+	"github.com/rohitgs28/mcpx/internal/middleware"
 	"github.com/rohitgs28/mcpx/internal/policy"
 	"github.com/rohitgs28/mcpx/internal/proxy"
 	"github.com/rohitgs28/mcpx/internal/ratelimit"
@@ -72,11 +76,28 @@ func main() {
 	}
 	ts := integrity.NewStore(integMode)
 
+	// Circuit-breaker state also persists across reloads (an open breaker
+	// must not reset on SIGHUP); its settings are read once at startup.
+	var bm *breaker.Manager
+	if cb := cfg.CircuitBreaker; cb != nil && cb.Enabled {
+		bm = breaker.NewManager(breaker.Config{
+			FailureThreshold: cb.FailureThreshold,
+			Cooldown:         time.Duration(cb.Cooldown),
+			HalfOpenMax:      cb.HalfOpenMax,
+		}, true)
+	}
+
 	// Build the initial handler and wrap it in a reloadable shell.
 	// On reload, we atomically swap the inner handler — new requests see
 	// the new config, in-flight requests finish against the old one.
-	initialHandler := buildHandler(cfg, mc, ts)
+	initialHandler, initialAudit := buildHandler(cfg, mc, ts, bm)
 	reloadable := newReloadableHandler(initialHandler)
+
+	// currentAudit tracks the live audit logger so its file handle can be
+	// closed when retired. Guarded by auditMu: reload runs on the SIGHUP
+	// and watch goroutines, the final Close on the main goroutine.
+	var auditMu sync.Mutex
+	currentAudit := initialAudit
 
 	// Build HTTP server against the reloadable wrapper. The listen address
 	// is captured from the initial config; changing it requires a restart.
@@ -97,8 +118,17 @@ func main() {
 			slog.Warn("listen address change requires restart; ignoring",
 				"current", initialListen, "new", newCfg.Listen)
 		}
-		h := buildHandler(newCfg, mc, ts)
+		h, newAudit := buildHandler(newCfg, mc, ts, bm)
 		reloadable.swap(h)
+		// Close the retired audit logger's file handle. In-flight requests
+		// on the old handler may lose their audit lines — acceptable, and
+		// strictly better than leaking a handle on every reload.
+		auditMu.Lock()
+		if currentAudit != nil {
+			currentAudit.Close()
+		}
+		currentAudit = newAudit
+		auditMu.Unlock()
 		slog.Info("config reloaded",
 			"servers", len(newCfg.Servers),
 			"auth", newCfg.Auth != nil && newCfg.Auth.Enabled,
@@ -171,6 +201,12 @@ func main() {
 		slog.Error("shutdown error", "error", err)
 	}
 
+	auditMu.Lock()
+	if currentAudit != nil {
+		currentAudit.Close()
+	}
+	auditMu.Unlock()
+
 	slog.Info("mcpx stopped")
 }
 
@@ -179,7 +215,9 @@ func main() {
 // It is called once at startup and again on every hot-reload.
 //
 // The metrics collector is passed in so that counters survive reloads.
-func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store) http.Handler {
+// The returned audit logger is owned by the caller, which must Close it
+// when the handler is retired (reload swap or shutdown).
+func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store, bm *breaker.Manager) (http.Handler, *audit.Logger) {
 	mc.SetServersRegistered(int64(len(cfg.Servers)))
 
 	// Build health checker with server info
@@ -204,7 +242,7 @@ func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store
 	// need the parsed MCP message (server, method, tool), which the proxy
 	// already extracts when routing. The remaining concerns (auth, rate
 	// limiting, metrics, CORS) are HTTP-level and wrap the gateway.
-	pe := policy.New(cfg.Servers)
+	pe := policy.New(cfg.Servers, cfg.Clients)
 
 	auditCfg := config.AuditConfig{}
 	if cfg.Audit != nil {
@@ -216,7 +254,7 @@ func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store
 		al, _ = audit.New(config.AuditConfig{})
 	}
 
-	gw, err := proxy.New(cfg, pe, al, ts, mc)
+	gw, err := proxy.New(cfg, pe, al, ts, bm, mc)
 	if err != nil {
 		slog.Error("failed to build gateway, serving 503 on /mcp/", "error", err)
 	}
@@ -227,7 +265,7 @@ func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store
 		handler = gw
 	} else {
 		handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			http.Error(w, `{"error":"gateway misconfigured"}`, http.StatusServiceUnavailable)
+			httperr.Write(w, http.StatusServiceUnavailable, httperr.CodeMisconfigured, "gateway misconfigured")
 		})
 	}
 
@@ -267,7 +305,7 @@ func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store
 		mux.HandleFunc(auth.MetadataPath, auth.ProtectedResourceMetadataHandler(*cfg.Auth.OAuth))
 	}
 
-	return mux
+	return middleware.RequestID(mux), al
 }
 
 // reloadableHandler is an http.Handler that forwards every request to
@@ -323,7 +361,10 @@ func metricsMiddleware(mc *metrics.Collector, next http.Handler) http.Handler {
 	})
 }
 
-// responseWriter captures the status code for metrics.
+// responseWriter captures the status code for metrics. It stays
+// streaming-transparent: Flush delegates so SSE events reach the client
+// immediately, and Unwrap lets http.ResponseController (used by the
+// gateway to lift write deadlines for streams) reach the real writer.
 type responseWriter struct {
 	http.ResponseWriter
 	statusCode int
@@ -333,6 +374,14 @@ func (rw *responseWriter) WriteHeader(code int) {
 	rw.statusCode = code
 	rw.ResponseWriter.WriteHeader(code)
 }
+
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (rw *responseWriter) Unwrap() http.ResponseWriter { return rw.ResponseWriter }
 
 // extractServerName extracts the server name from /mcp/{server}/...
 func extractServerName(path string) string {
