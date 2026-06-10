@@ -8,9 +8,26 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+// Duration accepts Go duration strings ("30s", "2m") in YAML.
+type Duration time.Duration
+
+func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
+	var s string
+	if err := value.Decode(&s); err != nil {
+		return err
+	}
+	dd, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("invalid duration %q (use Go syntax, e.g. \"30s\"): %w", s, err)
+	}
+	*d = Duration(dd)
+	return nil
+}
 
 // Config is the top-level gateway configuration.
 type Config struct {
@@ -22,6 +39,19 @@ type Config struct {
 	CORS       *CORSConfig             `yaml:"cors"`
 	Inspection *InspectionConfig       `yaml:"inspection"`
 	Clients    map[string]ClientConfig `yaml:"clients"` // per-client policy overrides, keyed by client name
+	// CircuitBreaker fails fast per backend after repeated upstream failures.
+	// Settings are read once at startup (like inspection.tool_integrity) so
+	// breaker state survives config hot-reloads; changing them needs a restart.
+	CircuitBreaker *CircuitBreakerConfig `yaml:"circuit_breaker"`
+}
+
+// CircuitBreakerConfig tunes the per-backend circuit breaker. Zero values
+// take defaults (threshold 5, cooldown 30s, half_open_max 1).
+type CircuitBreakerConfig struct {
+	Enabled          bool     `yaml:"enabled"`
+	FailureThreshold int      `yaml:"failure_threshold"` // consecutive failures that open the breaker
+	Cooldown         Duration `yaml:"cooldown"`          // open -> half-open delay
+	HalfOpenMax      int      `yaml:"half_open_max"`     // probes admitted while half-open
 }
 
 // ClientConfig narrows what an authenticated client may do, per server.
@@ -248,6 +278,18 @@ func (c *Config) Validate() error {
 			// valid
 		default:
 			return fmt.Errorf("inspection.tool_integrity must be \"off\", \"warn\", or \"enforce\" (got %q)", c.Inspection.ToolIntegrity)
+		}
+	}
+
+	if cb := c.CircuitBreaker; cb != nil && cb.Enabled {
+		if cb.FailureThreshold < 0 {
+			return fmt.Errorf("circuit_breaker.failure_threshold must not be negative (got %d)", cb.FailureThreshold)
+		}
+		if cb.Cooldown < 0 {
+			return fmt.Errorf("circuit_breaker.cooldown must not be negative")
+		}
+		if cb.HalfOpenMax < 0 {
+			return fmt.Errorf("circuit_breaker.half_open_max must not be negative (got %d)", cb.HalfOpenMax)
 		}
 	}
 

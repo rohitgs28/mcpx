@@ -28,6 +28,7 @@ import (
 
 	"github.com/rohitgs28/mcpx/internal/audit"
 	"github.com/rohitgs28/mcpx/internal/auth"
+	"github.com/rohitgs28/mcpx/internal/breaker"
 	"github.com/rohitgs28/mcpx/internal/config"
 	"github.com/rohitgs28/mcpx/internal/cors"
 	"github.com/rohitgs28/mcpx/internal/health"
@@ -75,10 +76,21 @@ func main() {
 	}
 	ts := integrity.NewStore(integMode)
 
+	// Circuit-breaker state also persists across reloads (an open breaker
+	// must not reset on SIGHUP); its settings are read once at startup.
+	var bm *breaker.Manager
+	if cb := cfg.CircuitBreaker; cb != nil && cb.Enabled {
+		bm = breaker.NewManager(breaker.Config{
+			FailureThreshold: cb.FailureThreshold,
+			Cooldown:         time.Duration(cb.Cooldown),
+			HalfOpenMax:      cb.HalfOpenMax,
+		}, true)
+	}
+
 	// Build the initial handler and wrap it in a reloadable shell.
 	// On reload, we atomically swap the inner handler — new requests see
 	// the new config, in-flight requests finish against the old one.
-	initialHandler, initialAudit := buildHandler(cfg, mc, ts)
+	initialHandler, initialAudit := buildHandler(cfg, mc, ts, bm)
 	reloadable := newReloadableHandler(initialHandler)
 
 	// currentAudit tracks the live audit logger so its file handle can be
@@ -106,7 +118,7 @@ func main() {
 			slog.Warn("listen address change requires restart; ignoring",
 				"current", initialListen, "new", newCfg.Listen)
 		}
-		h, newAudit := buildHandler(newCfg, mc, ts)
+		h, newAudit := buildHandler(newCfg, mc, ts, bm)
 		reloadable.swap(h)
 		// Close the retired audit logger's file handle. In-flight requests
 		// on the old handler may lose their audit lines — acceptable, and
@@ -205,7 +217,7 @@ func main() {
 // The metrics collector is passed in so that counters survive reloads.
 // The returned audit logger is owned by the caller, which must Close it
 // when the handler is retired (reload swap or shutdown).
-func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store) (http.Handler, *audit.Logger) {
+func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store, bm *breaker.Manager) (http.Handler, *audit.Logger) {
 	mc.SetServersRegistered(int64(len(cfg.Servers)))
 
 	// Build health checker with server info
@@ -242,7 +254,7 @@ func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store
 		al, _ = audit.New(config.AuditConfig{})
 	}
 
-	gw, err := proxy.New(cfg, pe, al, ts, mc)
+	gw, err := proxy.New(cfg, pe, al, ts, bm, mc)
 	if err != nil {
 		slog.Error("failed to build gateway, serving 503 on /mcp/", "error", err)
 	}

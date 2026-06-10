@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadValidConfig(t *testing.T) {
@@ -282,6 +283,50 @@ clients:
 `
 	if _, err := loadFromStringErr(badRule); err == nil {
 		t.Error("expected invalid regex in client policy to be rejected")
+	}
+}
+
+func TestValidateCircuitBreaker(t *testing.T) {
+	valid := `
+servers:
+  - name: test
+    url: http://localhost:3001
+circuit_breaker:
+  enabled: true
+  failure_threshold: 5
+  cooldown: 30s
+  half_open_max: 1
+`
+	cfg, err := loadFromStringErr(valid)
+	if err != nil {
+		t.Fatalf("valid circuit_breaker rejected: %v", err)
+	}
+	if d := time.Duration(cfg.CircuitBreaker.Cooldown); d != 30*time.Second {
+		t.Errorf("cooldown = %v, want 30s", d)
+	}
+
+	badDuration := `
+servers:
+  - name: test
+    url: http://localhost:3001
+circuit_breaker:
+  enabled: true
+  cooldown: thirty
+`
+	if _, err := loadFromStringErr(badDuration); err == nil {
+		t.Error("expected invalid duration string to be rejected")
+	}
+
+	negative := `
+servers:
+  - name: test
+    url: http://localhost:3001
+circuit_breaker:
+  enabled: true
+  failure_threshold: -1
+`
+	if _, err := loadFromStringErr(negative); err == nil {
+		t.Error("expected negative failure_threshold to be rejected")
 	}
 }
 

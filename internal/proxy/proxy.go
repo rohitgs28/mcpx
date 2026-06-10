@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/rohitgs28/mcpx/internal/audit"
 	"github.com/rohitgs28/mcpx/internal/auth"
+	"github.com/rohitgs28/mcpx/internal/breaker"
 	"github.com/rohitgs28/mcpx/internal/config"
 	"github.com/rohitgs28/mcpx/internal/httperr"
 	"github.com/rohitgs28/mcpx/internal/integrity"
@@ -25,14 +27,15 @@ import (
 )
 
 type Gateway struct {
-	servers map[string]*Backend
-	policy  *policy.Engine
-	audit   *audit.Logger
-	tools   *integrity.Store
-	metrics *metrics.Collector
-	filter  bool // remove policy-denied tools from tools/list responses
-	inspect bool // true when integrity or filtering needs response interception
-	mux     *http.ServeMux
+	servers  map[string]*Backend
+	policy   *policy.Engine
+	audit    *audit.Logger
+	tools    *integrity.Store
+	metrics  *metrics.Collector
+	breakers *breaker.Manager // may be nil/disabled: Get returns nil breakers
+	filter   bool             // remove policy-denied tools from tools/list responses
+	inspect  bool             // true when integrity or filtering needs response interception
+	mux      *http.ServeMux
 }
 
 type Backend struct {
@@ -57,16 +60,18 @@ type reqInfo struct {
 }
 
 // New builds a gateway. The policy engine and audit logger enforce/record
-// per-request decisions; the integrity store (may be nil) pins tool schemas.
+// per-request decisions; the integrity store (may be nil) pins tool schemas;
+// the breaker manager (may be nil) fails fast on repeatedly-failing backends.
 // Tool-list filtering is enabled via cfg.Inspection.FilterToolsList.
-func New(cfg *config.Config, pe *policy.Engine, al *audit.Logger, ts *integrity.Store, mc *metrics.Collector) (*Gateway, error) {
+func New(cfg *config.Config, pe *policy.Engine, al *audit.Logger, ts *integrity.Store, bm *breaker.Manager, mc *metrics.Collector) (*Gateway, error) {
 	g := &Gateway{
-		servers: make(map[string]*Backend),
-		policy:  pe,
-		audit:   al,
-		tools:   ts,
-		metrics: mc,
-		mux:     http.NewServeMux(),
+		servers:  make(map[string]*Backend),
+		policy:   pe,
+		audit:    al,
+		tools:    ts,
+		metrics:  mc,
+		breakers: bm,
+		mux:      http.NewServeMux(),
 	}
 	if cfg.Inspection != nil {
 		g.filter = cfg.Inspection.FilterToolsList
@@ -83,7 +88,9 @@ func New(cfg *config.Config, pe *policy.Engine, al *audit.Logger, ts *integrity.
 			// The stdlib flushes text/event-stream bodies immediately; the
 			// interval covers other streaming content types (e.g. ndjson).
 			p.FlushInterval = 100 * time.Millisecond
+			serverName := sc.Name
 			p.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+				g.recordBackendFailure(serverName)
 				httperr.Write(w, http.StatusBadGateway, httperr.CodeUpstreamError, "upstream error: "+err.Error())
 			}
 			if g.inspect {
@@ -100,6 +107,10 @@ func New(cfg *config.Config, pe *policy.Engine, al *audit.Logger, ts *integrity.
 						req.Header.Set("Accept", "application/json")
 					}
 				}
+			}
+			// ModifyResponse also feeds the circuit breaker (5xx = failure),
+			// so it is installed whenever inspection or breaking is on.
+			if g.inspect || g.breakers.Enabled() {
 				p.ModifyResponse = g.modifyResponse
 			}
 			g.servers[sc.Name] = &Backend{Name: sc.Name, URL: sc.URL, Proxy: p, Config: sc}
@@ -135,6 +146,28 @@ func (g *Gateway) recordToolCall(server, tool, decision, client string) {
 		return
 	}
 	g.metrics.RecordToolCall(server, tool, decision, client)
+}
+
+// recordBackendFailure feeds a backend failure to its circuit breaker,
+// logging and counting the transition when this failure trips it open.
+func (g *Gateway) recordBackendFailure(server string) {
+	br := g.breakers.Get(server)
+	if br == nil {
+		return
+	}
+	if br.RecordFailure() {
+		slog.Warn("circuit breaker opened", "server", server)
+		if g.metrics != nil {
+			g.metrics.RecordBreakerTrip()
+		}
+	}
+	g.setBreakerMetric(server, br)
+}
+
+func (g *Gateway) setBreakerMetric(server string, br *breaker.Breaker) {
+	if g.metrics != nil {
+		g.metrics.SetBreakerState(server, int64(br.State()))
+	}
 }
 
 func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
@@ -173,10 +206,31 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		g.recordToolCall(sn, entry.Tool, "allow", client)
-		// Thread routing details into ModifyResponse for tools/list inspection.
-		if g.inspect {
-			r = r.WithContext(context.WithValue(r.Context(), ctxKeyReqInfo, &reqInfo{server: sn, method: mreq.Method, client: client}))
+	}
+	// Fail fast while the backend's circuit is open instead of queueing
+	// requests against a dead upstream.
+	if br := g.breakers.Get(sn); br != nil && !br.Allow() {
+		entry.Allowed = false
+		entry.Reason = "circuit breaker open"
+		entry.StatusCode = http.StatusServiceUnavailable
+		entry.DurationMs = time.Since(start).Milliseconds()
+		g.audit.Log(entry)
+		msg := fmt.Sprintf("server %q temporarily unavailable (circuit open)", sn)
+		if mreq != nil {
+			httperr.WriteRPC(w, http.StatusServiceUnavailable, mreq.ID, -32000, msg)
+		} else {
+			httperr.Write(w, http.StatusServiceUnavailable, httperr.CodeUpstreamUnavailable, msg)
 		}
+		return
+	}
+	// Thread routing details to ModifyResponse: tools/list inspection needs
+	// server/method/client, the circuit breaker needs the server name.
+	if g.inspect || g.breakers.Enabled() {
+		method := ""
+		if mreq != nil {
+			method = mreq.Method
+		}
+		r = r.WithContext(context.WithValue(r.Context(), ctxKeyReqInfo, &reqInfo{server: sn, method: method, client: client}))
 	}
 	entry.Allowed = true
 	r.URL.Path = "/"
@@ -198,13 +252,25 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 // pinning and policy-based tool filtering before the body reaches the client.
 // All other responses pass through untouched.
 func (g *Gateway) modifyResponse(resp *http.Response) error {
+	info, _ := resp.Request.Context().Value(ctxKeyReqInfo).(*reqInfo)
+	// Feed the circuit breaker: a 5xx counts as a backend failure, anything
+	// else proves the backend alive.
+	if info != nil {
+		if br := g.breakers.Get(info.server); br != nil {
+			if resp.StatusCode >= http.StatusInternalServerError {
+				g.recordBackendFailure(info.server)
+			} else {
+				br.RecordSuccess()
+				g.setBreakerMetric(info.server, br)
+			}
+		}
+	}
 	// Streaming responses (MCP Streamable HTTP / SSE) pass through untouched:
 	// reading the body here would buffer the stream and stall the client.
 	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 		return nil
 	}
-	info, _ := resp.Request.Context().Value(ctxKeyReqInfo).(*reqInfo)
-	if info == nil || info.method != mcp.MethodToolsList || resp.StatusCode != http.StatusOK {
+	if !g.inspect || info == nil || info.method != mcp.MethodToolsList || resp.StatusCode != http.StatusOK {
 		return nil
 	}
 	// We forced identity encoding upstream; if a server compressed anyway,
