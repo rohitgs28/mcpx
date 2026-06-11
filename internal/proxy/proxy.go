@@ -83,7 +83,8 @@ func New(cfg *config.Config, pe *policy.Engine, al *audit.Logger, ts *integrity.
 	g.inspect = g.filter || (ts != nil && ts.Enabled())
 
 	for _, sc := range cfg.Servers {
-		if sc.Transport == "http" || sc.Transport == "sse" {
+		switch sc.Transport {
+		case "http", "sse":
 			target, err := url.Parse(sc.URL)
 			if err != nil {
 				return nil, fmt.Errorf("parsing URL for server %q: %w", sc.Name, err)
@@ -118,7 +119,7 @@ func New(cfg *config.Config, pe *policy.Engine, al *audit.Logger, ts *integrity.
 				p.ModifyResponse = g.modifyResponse
 			}
 			g.servers[sc.Name] = &Backend{Name: sc.Name, URL: sc.URL, Proxy: p, Config: sc}
-		} else if sc.Transport == "stdio" {
+		case "stdio":
 			if sm == nil {
 				return nil, fmt.Errorf("server %q: stdio transport requires a stdio manager", sc.Name)
 			}
