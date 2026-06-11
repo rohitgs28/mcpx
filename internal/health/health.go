@@ -41,11 +41,14 @@ type Report struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
-// ServerInfo holds the info needed to probe a backend.
+// ServerInfo holds the info needed to probe a backend. Probe, when set,
+// replaces the default HTTP GET — backends without a URL to poke (stdio
+// child processes) report their health through it.
 type ServerInfo struct {
 	Name   string
 	URL    string
 	Policy *PolicySummary
+	Probe  func(ctx context.Context) error
 }
 
 // Checker performs health checks against registered backends.
@@ -114,6 +117,16 @@ func (c *Checker) probe(ctx context.Context, srv ServerInfo) Status {
 		URL:       srv.URL,
 		CheckedAt: time.Now().UTC(),
 		Policy:    srv.Policy,
+	}
+
+	if srv.Probe != nil {
+		if err := srv.Probe(ctx); err != nil {
+			status.Error = err.Error()
+			return status
+		}
+		status.Healthy = true
+		status.LatencyMs = float64(time.Since(start).Microseconds()) / 1000.0
+		return status
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", srv.URL, nil)

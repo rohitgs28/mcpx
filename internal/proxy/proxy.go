@@ -24,6 +24,7 @@ import (
 	"github.com/rohitgs28/mcpx/internal/mcp"
 	"github.com/rohitgs28/mcpx/internal/metrics"
 	"github.com/rohitgs28/mcpx/internal/policy"
+	"github.com/rohitgs28/mcpx/internal/stdio"
 )
 
 type Gateway struct {
@@ -41,7 +42,8 @@ type Gateway struct {
 type Backend struct {
 	Name   string
 	URL    string
-	Proxy  *httputil.ReverseProxy
+	Proxy  *httputil.ReverseProxy // http/sse transports
+	Stdio  *stdio.Client          // stdio transport
 	Config config.ServerConfig
 }
 
@@ -61,9 +63,11 @@ type reqInfo struct {
 
 // New builds a gateway. The policy engine and audit logger enforce/record
 // per-request decisions; the integrity store (may be nil) pins tool schemas;
-// the breaker manager (may be nil) fails fast on repeatedly-failing backends.
-// Tool-list filtering is enabled via cfg.Inspection.FilterToolsList.
-func New(cfg *config.Config, pe *policy.Engine, al *audit.Logger, ts *integrity.Store, bm *breaker.Manager, mc *metrics.Collector) (*Gateway, error) {
+// the breaker manager (may be nil) fails fast on repeatedly-failing backends;
+// the stdio manager (required only when a stdio server is configured) owns
+// local child processes. Tool-list filtering is enabled via
+// cfg.Inspection.FilterToolsList.
+func New(cfg *config.Config, pe *policy.Engine, al *audit.Logger, ts *integrity.Store, bm *breaker.Manager, sm *stdio.Manager, mc *metrics.Collector) (*Gateway, error) {
 	g := &Gateway{
 		servers:  make(map[string]*Backend),
 		policy:   pe,
@@ -114,6 +118,12 @@ func New(cfg *config.Config, pe *policy.Engine, al *audit.Logger, ts *integrity.
 				p.ModifyResponse = g.modifyResponse
 			}
 			g.servers[sc.Name] = &Backend{Name: sc.Name, URL: sc.URL, Proxy: p, Config: sc}
+		} else if sc.Transport == "stdio" {
+			if sm == nil {
+				return nil, fmt.Errorf("server %q: stdio transport requires a stdio manager", sc.Name)
+			}
+			client := sm.Ensure(sc.Name, stdio.FromServerConfig(sc))
+			g.servers[sc.Name] = &Backend{Name: sc.Name, URL: "stdio:" + sc.Command, Stdio: client, Config: sc}
 		}
 	}
 	g.mux.HandleFunc("/mcp/", g.handleMCP)
@@ -223,6 +233,12 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// Stdio backends bypass the reverse proxy entirely: the request is
+	// bridged onto the child process and the reply written directly.
+	if b.Stdio != nil {
+		g.serveStdio(w, r, b, mreq, body, entry, start)
+		return
+	}
 	// Thread routing details to ModifyResponse: tools/list inspection needs
 	// server/method/client, the circuit breaker needs the server name.
 	if g.inspect || g.breakers.Enabled() {
@@ -246,6 +262,60 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 	entry.DurationMs = time.Since(start).Milliseconds()
 	entry.StatusCode = http.StatusOK
 	g.audit.Log(entry)
+}
+
+// serveStdio bridges one HTTP request onto a stdio backend. Auth, rate
+// limiting, policy, and the circuit breaker have already run by the time we
+// get here; this handles transport translation, feeds the breaker, and
+// applies the same tools/list inspection the reverse proxy path gets.
+func (g *Gateway) serveStdio(w http.ResponseWriter, r *http.Request, b *Backend, mreq *mcp.Request, body []byte, entry audit.Entry, start time.Time) {
+	finish := func(status int) {
+		entry.StatusCode = status
+		entry.DurationMs = time.Since(start).Milliseconds()
+		g.audit.Log(entry)
+	}
+	if r.Method != http.MethodPost {
+		finish(http.StatusMethodNotAllowed)
+		httperr.Write(w, http.StatusMethodNotAllowed, httperr.CodeBadRequest, "stdio backends accept POST only")
+		return
+	}
+	if mreq == nil {
+		finish(http.StatusBadRequest)
+		httperr.Write(w, http.StatusBadRequest, httperr.CodeBadRequest, "stdio backends require a JSON-RPC request body")
+		return
+	}
+	// Notifications expect no reply; 202 mirrors the Streamable HTTP spec.
+	if mreq.ID == nil {
+		if err := b.Stdio.Notify(body); err != nil {
+			g.recordBackendFailure(b.Name)
+			finish(http.StatusBadGateway)
+			httperr.Write(w, http.StatusBadGateway, httperr.CodeUpstreamError, "upstream error: "+err.Error())
+			return
+		}
+		finish(http.StatusAccepted)
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	respBody, err := b.Stdio.Call(r.Context(), body)
+	if err != nil {
+		g.recordBackendFailure(b.Name)
+		finish(http.StatusBadGateway)
+		httperr.WriteRPC(w, http.StatusBadGateway, mreq.ID, -32000, "upstream error: "+err.Error())
+		return
+	}
+	if br := g.breakers.Get(b.Name); br != nil {
+		br.RecordSuccess()
+		g.setBreakerMetric(b.Name, br)
+	}
+	if g.inspect && mreq.Method == mcp.MethodToolsList {
+		if newBody, changed := g.processToolsList(b.Name, entry.Client, respBody); changed {
+			respBody = newBody
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(respBody)))
+	finish(http.StatusOK)
+	w.Write(respBody)
 }
 
 // modifyResponse inspects tools/list responses, applying schema-integrity

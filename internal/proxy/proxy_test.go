@@ -14,6 +14,7 @@ import (
 	"github.com/rohitgs28/mcpx/internal/metrics"
 	"github.com/rohitgs28/mcpx/internal/policy"
 	"github.com/rohitgs28/mcpx/internal/proxy"
+	"github.com/rohitgs28/mcpx/internal/stdio"
 )
 
 // upstream returns a test MCP server whose tools/list body can be swapped
@@ -55,7 +56,7 @@ func newGatewayFromConfig(t *testing.T, cfg *config.Config, mode ...integrity.Mo
 	if err != nil {
 		t.Fatalf("audit.New: %v", err)
 	}
-	gw, err := proxy.New(cfg, policy.New(cfg.Servers, cfg.Clients), al, integrity.NewStore(m), nil, metrics.New())
+	gw, err := proxy.New(cfg, policy.New(cfg.Servers, cfg.Clients), al, integrity.NewStore(m), nil, stdio.NewManager(), metrics.New())
 	if err != nil {
 		t.Fatalf("proxy.New: %v", err)
 	}
@@ -194,7 +195,7 @@ func TestGateway_RecordsToolCallMetric(t *testing.T) {
 	}
 	al, _ := audit.New(config.AuditConfig{})
 	mc := metrics.New()
-	gw, err := proxy.New(cfg, policy.New(cfg.Servers, cfg.Clients), al, integrity.NewStore(integrity.ModeOff), nil, mc)
+	gw, err := proxy.New(cfg, policy.New(cfg.Servers, cfg.Clients), al, integrity.NewStore(integrity.ModeOff), nil, nil, mc)
 	if err != nil {
 		t.Fatalf("proxy.New: %v", err)
 	}
