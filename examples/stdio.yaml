@@ -1,0 +1,46 @@
+# mcpx with local stdio MCP servers.
+#
+# The gateway spawns each server as a child process and bridges HTTP
+# JSON-RPC onto its stdin/stdout, so every security feature (auth, policy,
+# rate limiting, audit, integrity pinning) applies to local servers too.
+#
+# Run:   mcpx -c examples/stdio.yaml
+# Then point your MCP client at http://localhost:8080/mcp/filesystem
+
+listen: ":8080"
+
+servers:
+  - name: filesystem
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/data"]
+    request_timeout: 30s
+    policy:
+      allow_tools:
+        - read_file
+        - read_multiple_files
+        - list_directory
+        - search_files
+
+  - name: github
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+    env:
+      GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_your_token_here"
+    policy:
+      deny_tools:
+        - create_repository
+        - delete_file
+
+auth:
+  enabled: true
+  type: bearer
+  token: "change-me"
+
+audit:
+  enabled: true
+  output: stdout
+
+inspection:
+  filter_tools_list: true

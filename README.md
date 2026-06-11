@@ -119,6 +119,13 @@ servers:
     policy:
       read_only: true  # blocks tools/call, allows tools/list
 
+  - name: github            # local stdio server, spawned by the gateway
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+    env:
+      GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_..."
+
 auth:
   enabled: true
   type: bearer
@@ -214,6 +221,28 @@ Each client sees its own filtered `tools/list`, audit entries carry the client n
 ### 📡 Streaming (SSE) Pass-Through
 
 MCP Streamable HTTP responses (`Content-Type: text/event-stream`) stream through the gateway unbuffered — events reach the client as the backend emits them, and streams may outlive the server's write timeout. Request-side auth, policy, and rate limiting apply as usual. To keep the `tools/list` security guarantee, when inspection is enabled the gateway pins `tools/list` requests to JSON responses (rewrites `Accept`), so integrity pinning and list filtering cannot be bypassed by a streaming response.
+
+### 🖥️ Stdio Transport (Local MCP Servers)
+
+Most real-world MCP servers are local processes spoken to over stdin/stdout (`npx ...`, `uvx ...`). With `transport: stdio` the gateway spawns the server itself and bridges HTTP JSON-RPC onto it — so auth, policies, rate limiting, audit logging, tool integrity pinning, and list filtering all apply to local servers exactly as they do to HTTP backends.
+
+```yaml
+servers:
+  - name: filesystem
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/data"]
+    env:                    # extra environment for the child
+      LOG_LEVEL: info
+    workdir: /data          # optional working directory
+    request_timeout: 30s    # per-request reply deadline (default 30s)
+    policy:
+      allow_tools: [read_file, list_directory]
+```
+
+One shared child process serves all gateway clients: it is spawned lazily on first request, respawned (with backoff) if it crashes, and retired when its config entry changes or disappears. Request IDs are rewritten internally so concurrent clients never collide, and the MCP `initialize` handshake is cached — later clients get the cached result, and the handshake is replayed automatically after a respawn so existing sessions keep working. Children survive config hot-reloads that leave their entry untouched, and a graceful gateway shutdown closes their stdin (killing only those that linger).
+
+Notifications return `202 Accepted` (mirroring the Streamable HTTP spec). Server-initiated messages (sampling, log notifications) are dropped with a log line — there is no single addressable client on a shared gateway.
 
 ### ⚡ Circuit Breaker
 
@@ -337,8 +366,8 @@ See [ROADMAP.md](ROADMAP.md) for the full plan. Key upcoming work:
 - [x] SSE / Streamable HTTP pass-through
 - [x] Argument-level and per-client policies
 - [x] Per-backend circuit breaker
+- [x] Stdio transport (spawn local MCP servers)
 - [ ] WebSocket transport proxying
-- [ ] Stdio transport (spawn local MCP servers)
 - [ ] OpenTelemetry tracing
 - [ ] Web dashboard
 - [ ] Plugin system (Go + WASM)

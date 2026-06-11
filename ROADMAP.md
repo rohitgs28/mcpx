@@ -36,7 +36,7 @@ Make mcpx the simplest, fastest way to secure MCP servers in production. One bin
 
 - [x] Server-Sent Events (SSE) proxy — streaming MCP transport (Streamable HTTP pass-through)
 - [ ] WebSocket proxy — bidirectional streaming MCP transport
-- [ ] Stdio transport — spawn and manage local MCP servers as child processes
+- [x] Stdio transport — spawn and manage local MCP servers as child processes
 - [x] Transport auto-detection — streaming responses detected per response via Content-Type
 
 ## Phase 4: Enterprise Security

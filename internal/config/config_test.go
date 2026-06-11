@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -85,7 +86,7 @@ func TestValidateTransport(t *testing.T) {
 		{"http", false},
 		{"sse", false},
 		{"websocket", true},
-		{"stdio", true},
+		{"stdio", true}, // url is set below, which stdio forbids
 	}
 	for _, tt := range tests {
 		yaml := `
@@ -98,6 +99,83 @@ servers:
 		if (err != nil) != tt.wantErr {
 			t.Errorf("transport %q: err = %v, wantErr %v", tt.transport, err, tt.wantErr)
 		}
+	}
+}
+
+func TestValidateStdioTransport(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "valid stdio server",
+			yaml: `
+servers:
+  - name: fs
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/data"]
+    env:
+      LOG_LEVEL: debug
+    request_timeout: 45s
+`,
+		},
+		{
+			name: "stdio requires command",
+			yaml: `
+servers:
+  - name: fs
+    transport: stdio
+`,
+			wantErr: "command is required",
+		},
+		{
+			name: "stdio forbids url",
+			yaml: `
+servers:
+  - name: fs
+    transport: stdio
+    command: npx
+    url: http://localhost:3001
+`,
+			wantErr: "url must not be set",
+		},
+		{
+			name: "http forbids command",
+			yaml: `
+servers:
+  - name: web
+    url: http://localhost:3001
+    command: npx
+`,
+			wantErr: "command is only valid",
+		},
+		{
+			name: "negative request_timeout rejected",
+			yaml: `
+servers:
+  - name: fs
+    transport: stdio
+    command: npx
+    request_timeout: -5s
+`,
+			wantErr: "request_timeout must not be negative",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := loadFromStringErr(tt.yaml)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 

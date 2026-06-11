@@ -39,6 +39,7 @@ import (
 	"github.com/rohitgs28/mcpx/internal/policy"
 	"github.com/rohitgs28/mcpx/internal/proxy"
 	"github.com/rohitgs28/mcpx/internal/ratelimit"
+	"github.com/rohitgs28/mcpx/internal/stdio"
 )
 
 const version = "0.1.0"
@@ -87,10 +88,15 @@ func main() {
 		}, true)
 	}
 
+	// Stdio child processes also persist across reloads: a SIGHUP that
+	// leaves a server's spawn config untouched keeps its process (and the
+	// MCP sessions on it) running.
+	sm := stdio.NewManager()
+
 	// Build the initial handler and wrap it in a reloadable shell.
 	// On reload, we atomically swap the inner handler — new requests see
 	// the new config, in-flight requests finish against the old one.
-	initialHandler, initialAudit := buildHandler(cfg, mc, ts, bm)
+	initialHandler, initialAudit := buildHandler(cfg, mc, ts, bm, sm)
 	reloadable := newReloadableHandler(initialHandler)
 
 	// currentAudit tracks the live audit logger so its file handle can be
@@ -118,8 +124,16 @@ func main() {
 			slog.Warn("listen address change requires restart; ignoring",
 				"current", initialListen, "new", newCfg.Listen)
 		}
-		h, newAudit := buildHandler(newCfg, mc, ts, bm)
+		h, newAudit := buildHandler(newCfg, mc, ts, bm, sm)
 		reloadable.swap(h)
+		// Stop child processes for stdio servers dropped from the config.
+		active := make(map[string]bool)
+		for _, s := range newCfg.Servers {
+			if s.Transport == "stdio" {
+				active[s.Name] = true
+			}
+		}
+		sm.Prune(active)
 		// Close the retired audit logger's file handle. In-flight requests
 		// on the old handler may lose their audit lines — acceptable, and
 		// strictly better than leaking a handle on every reload.
@@ -203,6 +217,8 @@ func main() {
 		slog.Error("shutdown error", "error", err)
 	}
 
+	sm.CloseAll()
+
 	auditMu.Lock()
 	if currentAudit != nil {
 		if err := currentAudit.Close(); err != nil {
@@ -221,7 +237,7 @@ func main() {
 // The metrics collector is passed in so that counters survive reloads.
 // The returned audit logger is owned by the caller, which must Close it
 // when the handler is retired (reload swap or shutdown).
-func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store, bm *breaker.Manager) (http.Handler, *audit.Logger) {
+func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store, bm *breaker.Manager, sm *stdio.Manager) (http.Handler, *audit.Logger) {
 	mc.SetServersRegistered(int64(len(cfg.Servers)))
 
 	// Build health checker with server info
@@ -230,6 +246,11 @@ func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store
 		hs := health.ServerInfo{
 			Name: srv.Name,
 			URL:  srv.URL,
+		}
+		if srv.Transport == "stdio" {
+			// No URL to poke; the child process reports its own state.
+			hs.URL = "stdio:" + srv.Command
+			hs.Probe = sm.Ensure(srv.Name, stdio.FromServerConfig(srv)).Probe
 		}
 		if srv.Policy != nil {
 			hs.Policy = &health.PolicySummary{
@@ -258,7 +279,7 @@ func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store
 		al, _ = audit.New(config.AuditConfig{})
 	}
 
-	gw, err := proxy.New(cfg, pe, al, ts, bm, mc)
+	gw, err := proxy.New(cfg, pe, al, ts, bm, sm, mc)
 	if err != nil {
 		slog.Error("failed to build gateway, serving 503 on /mcp/", "error", err)
 	}
@@ -409,7 +430,11 @@ func serversHandler(w http.ResponseWriter, _ *http.Request, cfg *config.Config) 
 		if i > 0 {
 			w.Write([]byte(","))
 		}
-		fmt.Fprintf(w, `{"name":%q,"url":%q}`, srv.Name, srv.URL)
+		url := srv.URL
+		if srv.Transport == "stdio" {
+			url = "stdio:" + srv.Command
+		}
+		fmt.Fprintf(w, `{"name":%q,"url":%q}`, srv.Name, url)
 	}
 	w.Write([]byte("]}"))
 }

@@ -75,10 +75,18 @@ type InspectionConfig struct {
 
 // ServerConfig defines a backend MCP server.
 type ServerConfig struct {
-	Name      string  `yaml:"name"`
-	URL       string  `yaml:"url"`
-	Transport string  `yaml:"transport"` // "http" (default) or its alias "sse"; SSE streams are auto-detected per response
-	Policy    *Policy `yaml:"policy"`
+	Name      string `yaml:"name"`
+	URL       string `yaml:"url"`       // http/sse only
+	Transport string `yaml:"transport"` // "http" (default), its alias "sse" (SSE streams are auto-detected per response), or "stdio"
+	// Stdio transport: the gateway spawns Command as a child process and
+	// speaks newline-delimited JSON-RPC over its stdin/stdout. One shared
+	// process serves all gateway clients.
+	Command        string            `yaml:"command"`         // stdio only: executable to spawn
+	Args           []string          `yaml:"args"`            // stdio only: arguments for Command
+	Env            map[string]string `yaml:"env"`             // stdio only: extra environment for the child
+	WorkDir        string            `yaml:"workdir"`         // stdio only: working directory for the child
+	RequestTimeout Duration          `yaml:"request_timeout"` // stdio only: per-request reply deadline (default 30s)
+	Policy         *Policy           `yaml:"policy"`
 }
 
 // Policy defines tool-level access control for a server.
@@ -210,17 +218,31 @@ func (c *Config) Validate() error {
 		if srv.Name == "" {
 			return fmt.Errorf("server %d: name is required", i)
 		}
-		if srv.URL == "" {
-			return fmt.Errorf("server %q: url is required", srv.Name)
-		}
 		switch srv.Transport {
 		case "":
 			c.Servers[i].Transport = "http"
+			fallthrough
 		case "http", "sse":
 			// valid; "sse" is an alias of "http" — streaming responses are
 			// detected per-response via Content-Type, not per-server.
+			if srv.URL == "" {
+				return fmt.Errorf("server %q: url is required", srv.Name)
+			}
+			if srv.Command != "" {
+				return fmt.Errorf("server %q: command is only valid with transport \"stdio\"", srv.Name)
+			}
+		case "stdio":
+			if srv.Command == "" {
+				return fmt.Errorf("server %q: command is required with transport \"stdio\"", srv.Name)
+			}
+			if srv.URL != "" {
+				return fmt.Errorf("server %q: url must not be set with transport \"stdio\"", srv.Name)
+			}
 		default:
-			return fmt.Errorf("server %q: transport must be \"http\" or \"sse\" (got %q)", srv.Name, srv.Transport)
+			return fmt.Errorf("server %q: transport must be \"http\", \"sse\", or \"stdio\" (got %q)", srv.Name, srv.Transport)
+		}
+		if srv.RequestTimeout < 0 {
+			return fmt.Errorf("server %q: request_timeout must not be negative", srv.Name)
 		}
 		if err := validatePolicy(srv.Policy, fmt.Sprintf("server %q", srv.Name)); err != nil {
 			return err

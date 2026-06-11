@@ -72,6 +72,7 @@ const (
 	MethodToolsCall    = "tools/call"
 	MethodToolsList    = "tools/list"
 	MethodInitialize   = "initialize"
+	MethodInitialized  = "notifications/initialized"
 	MethodPing         = "ping"
 	MethodResourceRead = "resources/read"
 	MethodResourceList = "resources/list"
