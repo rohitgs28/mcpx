@@ -9,7 +9,7 @@
 
 ---
 
-mcpx is a lightweight gateway proxy for [Model Context Protocol](https://modelcontextprotocol.io/) servers. It sits between your MCP clients (Claude, Cursor, VS Code, custom agents) and your MCP servers, adding authentication, rate limiting, tool-level access control, and audit logging — without modifying your existing servers.
+mcpx is a lightweight gateway proxy for [Model Context Protocol](https://modelcontextprotocol.io/) servers. It sits between your MCP clients (Claude, Cursor, VS Code, custom agents) and your MCP servers, adding authentication, rate limiting, tool-level access control, and audit logging - without modifying your existing servers.
 
 ```
 MCP Client (Claude, Cursor, etc.)
@@ -79,8 +79,8 @@ The repo ships a tiny mock MCP server so you can see the gateway work with no se
 docker compose up --build
 
 # …or run locally in two terminals:
-go run ./examples/mock-mcp                  # terminal 1 — mock server on :3001
-go run ./cmd/mcpx -c examples/demo.yaml     # terminal 2 — gateway on :8080
+go run ./examples/mock-mcp                  # terminal 1 - mock server on :3001
+go run ./cmd/mcpx -c examples/demo.yaml     # terminal 2 - gateway on :8080
 ```
 
 Then list the tools through the gateway:
@@ -144,7 +144,7 @@ rate_limit:
   tool_burst: 5
 
 inspection:
-  tool_integrity: enforce   # off | warn | enforce — pin tool schemas, block mutation
+  tool_integrity: enforce   # off | warn | enforce - pin tool schemas, block mutation
   filter_tools_list: true   # hide policy-denied tools from tools/list responses
 ```
 
@@ -154,7 +154,7 @@ inspection:
 
 Bearer token, API key, and **OAuth 2.1** authentication. Requests without valid credentials are rejected before reaching any backend.
 
-In `oauth` mode mcpx acts as an OAuth 2.1 protected resource server aligned with the [MCP authorization spec](https://modelcontextprotocol.io/specification/draft/basic/authorization): it verifies JWT (RS256) signatures against the authorization server's JWKS and enforces **audience binding** (RFC 8707) — a token is rejected unless its `aud` claim names this gateway, which is the spec's defense against token-passthrough and confused-deputy attacks. It also publishes [RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728) Protected Resource Metadata at `/.well-known/oauth-protected-resource` and advertises it via `WWW-Authenticate` on `401` responses.
+In `oauth` mode mcpx acts as an OAuth 2.1 protected resource server aligned with the [MCP authorization spec](https://modelcontextprotocol.io/specification/draft/basic/authorization): it verifies JWT (RS256) signatures against the authorization server's JWKS and enforces **audience binding** (RFC 8707) - a token is rejected unless its `aud` claim names this gateway, which is the spec's defense against token-passthrough and confused-deputy attacks. It also publishes [RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728) Protected Resource Metadata at `/.well-known/oauth-protected-resource` and advertises it via `WWW-Authenticate` on `401` responses.
 
 ```yaml
 auth:
@@ -182,7 +182,7 @@ With `inspection.filter_tools_list: true`, denied tools are also stripped from `
 
 ### 🎯 Argument-Level Rules
 
-Constrain *what* a tool may be called with, not just whether it may be called. Constraints (`equals`, `one_of`, `prefix`, `suffix`, `regex`, `required`) are ANDed per argument and evaluated deterministically — violations return a `403` naming the violated rule.
+Constrain *what* a tool may be called with, not just whether it may be called. Constraints (`equals`, `one_of`, `prefix`, `suffix`, `regex`, `required`) are ANDed per argument and evaluated deterministically - violations return a `403` naming the violated rule.
 
 ```yaml
 policy:
@@ -195,11 +195,11 @@ policy:
         sql: { regex: "^SELECT ", required: true }
 ```
 
-Scalar values compare as strings (bools and numbers normalized); a rule that targets a non-scalar value fails closed. `prefix` is a literal check — no path canonicalization.
+Scalar values compare as strings (bools and numbers normalized); a rule that targets a non-scalar value fails closed. `prefix` is a literal check - no path canonicalization.
 
 ### 👥 Per-Client Policies
 
-Give each caller an identity and a policy. Bearer/API-key auth accepts multiple named credentials; OAuth derives the identity from a JWT claim (`identity_claim`, default `sub`). The effective decision is the **intersection** of the server policy and the client's override — both must allow a call, so overrides can only restrict, never widen, the baseline.
+Give each caller an identity and a policy. Bearer/API-key auth accepts multiple named credentials; OAuth derives the identity from a JWT claim (`identity_claim`, default `sub`). The effective decision is the **intersection** of the server policy and the client's override - both must allow a call, so overrides can only restrict, never widen, the baseline.
 
 ```yaml
 auth:
@@ -220,11 +220,11 @@ Each client sees its own filtered `tools/list`, audit entries carry the client n
 
 ### 📡 Streaming (SSE) Pass-Through
 
-MCP Streamable HTTP responses (`Content-Type: text/event-stream`) stream through the gateway unbuffered — events reach the client as the backend emits them, and streams may outlive the server's write timeout. Request-side auth, policy, and rate limiting apply as usual. To keep the `tools/list` security guarantee, when inspection is enabled the gateway pins `tools/list` requests to JSON responses (rewrites `Accept`), so integrity pinning and list filtering cannot be bypassed by a streaming response.
+MCP Streamable HTTP responses (`Content-Type: text/event-stream`) stream through the gateway unbuffered - events reach the client as the backend emits them, and streams may outlive the server's write timeout. Request-side auth, policy, and rate limiting apply as usual. To keep the `tools/list` security guarantee, when inspection is enabled the gateway pins `tools/list` requests to JSON responses (rewrites `Accept`), so integrity pinning and list filtering cannot be bypassed by a streaming response.
 
 ### 🖥️ Stdio Transport (Local MCP Servers)
 
-Most real-world MCP servers are local processes spoken to over stdin/stdout (`npx ...`, `uvx ...`). With `transport: stdio` the gateway spawns the server itself and bridges HTTP JSON-RPC onto it — so auth, policies, rate limiting, audit logging, tool integrity pinning, and list filtering all apply to local servers exactly as they do to HTTP backends.
+Most real-world MCP servers are local processes spoken to over stdin/stdout (`npx ...`, `uvx ...`). With `transport: stdio` the gateway spawns the server itself and bridges HTTP JSON-RPC onto it - so auth, policies, rate limiting, audit logging, tool integrity pinning, and list filtering all apply to local servers exactly as they do to HTTP backends.
 
 ```yaml
 servers:
@@ -240,9 +240,9 @@ servers:
       allow_tools: [read_file, list_directory]
 ```
 
-One shared child process serves all gateway clients: it is spawned lazily on first request, respawned (with backoff) if it crashes, and retired when its config entry changes or disappears. Request IDs are rewritten internally so concurrent clients never collide, and the MCP `initialize` handshake is cached — later clients get the cached result, and the handshake is replayed automatically after a respawn so existing sessions keep working. Children survive config hot-reloads that leave their entry untouched, and a graceful gateway shutdown closes their stdin (killing only those that linger).
+One shared child process serves all gateway clients: it is spawned lazily on first request, respawned (with backoff) if it crashes, and retired when its config entry changes or disappears. Request IDs are rewritten internally so concurrent clients never collide, and the MCP `initialize` handshake is cached - later clients get the cached result, and the handshake is replayed automatically after a respawn so existing sessions keep working. Children survive config hot-reloads that leave their entry untouched, and a graceful gateway shutdown closes their stdin (killing only those that linger).
 
-Notifications return `202 Accepted` (mirroring the Streamable HTTP spec). Server-initiated messages (sampling, log notifications) are dropped with a log line — there is no single addressable client on a shared gateway.
+Notifications return `202 Accepted` (mirroring the Streamable HTTP spec). Server-initiated messages (sampling, log notifications) are dropped with a log line - there is no single addressable client on a shared gateway.
 
 ### ⚡ Circuit Breaker
 
@@ -258,19 +258,19 @@ circuit_breaker:
 
 ### 🔎 Tool Integrity Pinning
 
-mcpx hashes the **full schema** of every tool (name, description, and input schema) the first time a backend advertises it, then flags any later change. This deterministically detects **rug-pull tool mutation** ([CVE-2025-54136](https://nvd.nist.gov/vuln/detail/CVE-2025-54136)), cross-server shadowing, and full-schema poisoning — attacks where a server silently rewrites a tool the client already approved.
+mcpx hashes the **full schema** of every tool (name, description, and input schema) the first time a backend advertises it, then flags any later change. This deterministically detects **rug-pull tool mutation** ([CVE-2025-54136](https://nvd.nist.gov/vuln/detail/CVE-2025-54136)), cross-server shadowing, and full-schema poisoning - attacks where a server silently rewrites a tool the client already approved.
 
 ```yaml
 inspection:
   tool_integrity: enforce   # off | warn | enforce
 ```
 
-- **`warn`** — log a violation to the audit trail, pass the tool through.
-- **`enforce`** — log it and drop the mutated tool from `tools/list` so clients can't invoke it.
+- **`warn`** - log a violation to the audit trail, pass the tool through.
+- **`enforce`** - log it and drop the mutated tool from `tools/list` so clients can't invoke it.
 
 The baseline lives in memory and survives config hot-reloads. Hashing is canonical (key-order independent), so legitimate re-serialization doesn't trigger false positives.
 
-> **Scope note:** this defends *static* tool-schema integrity, which is deterministically checkable. It does **not** attempt regex/LLM scanning of tool descriptions or runtime tool *output* for prompt injection — those are bypassable and better handled by least-privilege scoping, so mcpx deliberately doesn't ship security theater there.
+> **Scope note:** this defends *static* tool-schema integrity, which is deterministically checkable. It does **not** attempt regex/LLM scanning of tool descriptions or runtime tool *output* for prompt injection - those are bypassable and better handled by least-privilege scoping, so mcpx deliberately doesn't ship security theater there.
 
 ### ⏱️ Rate Limiting
 
@@ -354,7 +354,7 @@ Every request is inspected at the MCP protocol level. The gateway parses JSON-RP
 
 ## Security
 
-mcpx is explicit about what it defends and what it doesn't. See **[SECURITY.md](SECURITY.md)** for the full threat model — which MCP attacks (rug-pulls, token passthrough, confused deputy, schema poisoning) it mitigates and how, plus the deliberate non-goals (it does **not** do bypassable regex/LLM prompt-injection scanning). Report vulnerabilities via [GitHub Security Advisories](https://github.com/rohitgs28/mcpx/security/advisories/new).
+mcpx is explicit about what it defends and what it doesn't. See **[SECURITY.md](SECURITY.md)** for the full threat model - which MCP attacks (rug-pulls, token passthrough, confused deputy, schema poisoning) it mitigates and how, plus the deliberate non-goals (it does **not** do bypassable regex/LLM prompt-injection scanning). Report vulnerabilities via [GitHub Security Advisories](https://github.com/rohitgs28/mcpx/security/advisories/new).
 
 ## Roadmap
 
