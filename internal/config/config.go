@@ -43,6 +43,37 @@ type Config struct {
 	// Settings are read once at startup (like inspection.tool_integrity) so
 	// breaker state survives config hot-reloads; changing them needs a restart.
 	CircuitBreaker *CircuitBreakerConfig `yaml:"circuit_breaker"`
+	// Tracing configures OpenTelemetry distributed tracing. Like the circuit
+	// breaker, its settings are read once at startup (the exporter connection
+	// persists across reloads), so changing them needs a restart.
+	Tracing *TracingConfig `yaml:"tracing"`
+}
+
+// TracingConfig configures OpenTelemetry (OTLP) distributed tracing. When
+// enabled, mcpx emits one root span per request with child spans for policy
+// evaluation and the backend call, and propagates W3C trace context to
+// instrumented HTTP backends. When disabled (the default) tracing is a
+// near-zero-cost no-op. Zero values take defaults: exporter "otlp",
+// service_name "mcpx", sample_ratio 1.0, insecure true.
+type TracingConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Exporter selects the span exporter: "otlp" (default, OTLP over HTTP) or
+	// "stdout" (prints spans to stdout, for local debugging).
+	Exporter string `yaml:"exporter"`
+	// Endpoint is the OTLP/HTTP collector address (host:port, default port
+	// 4318). Required when exporter is "otlp".
+	Endpoint string `yaml:"endpoint"`
+	// ServiceName is reported as service.name on every span (default "mcpx").
+	ServiceName string `yaml:"service_name"`
+	// SampleRatio is the head-based sampling probability in [0,1] (default 1.0,
+	// sample everything). Applied via a parent-based ratio sampler.
+	SampleRatio *float64 `yaml:"sample_ratio"` // pointer so 0.0 is distinguishable from unset
+	// Insecure sends OTLP over plain HTTP instead of HTTPS (default true, for
+	// local collectors). Set false to use TLS.
+	Insecure *bool `yaml:"insecure"` // pointer so false is distinguishable from unset
+	// Headers are extra HTTP headers sent to the OTLP collector, e.g. an
+	// authorization header for a hosted backend.
+	Headers map[string]string `yaml:"headers"`
 }
 
 // CircuitBreakerConfig tunes the per-backend circuit breaker. Zero values
@@ -312,6 +343,21 @@ func (c *Config) Validate() error {
 		}
 		if cb.HalfOpenMax < 0 {
 			return fmt.Errorf("circuit_breaker.half_open_max must not be negative (got %d)", cb.HalfOpenMax)
+		}
+	}
+
+	if tr := c.Tracing; tr != nil && tr.Enabled {
+		switch tr.Exporter {
+		case "", "otlp", "stdout":
+			// valid; empty defaults to "otlp"
+		default:
+			return fmt.Errorf("tracing.exporter must be \"otlp\" or \"stdout\" (got %q)", tr.Exporter)
+		}
+		if tr.Exporter != "stdout" && tr.Endpoint == "" {
+			return fmt.Errorf("tracing.endpoint is required when tracing.exporter is \"otlp\"")
+		}
+		if tr.SampleRatio != nil && (*tr.SampleRatio < 0 || *tr.SampleRatio > 1) {
+			return fmt.Errorf("tracing.sample_ratio must be between 0.0 and 1.0 (got %v)", *tr.SampleRatio)
 		}
 	}
 
