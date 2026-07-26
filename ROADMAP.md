@@ -54,7 +54,7 @@ Make mcpx the simplest, fastest way to secure MCP servers in production. One bin
 
 ## Phase 5: Operational Excellence
 
-- [ ] OpenTelemetry tracing integration
+- [x] OpenTelemetry tracing integration (OTLP/HTTP spans, W3C context propagation)
 - [ ] Prometheus metrics with Grafana dashboard template
 - [x] Hot config reload (SIGHUP or watch mode)
 - [x] Graceful shutdown with connection draining

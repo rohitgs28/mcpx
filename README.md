@@ -9,14 +9,28 @@
 
 ---
 
-mcpx is a lightweight gateway proxy for [Model Context Protocol](https://modelcontextprotocol.io/) servers. It sits between your MCP clients (Claude, Cursor, VS Code, custom agents) and your MCP servers, adding authentication, rate limiting, tool-level access control, and audit logging - without modifying your existing servers.
+## What is mcpx, in plain English?
+
+[MCP](https://modelcontextprotocol.io/) servers give AI assistants **real tools** — the ability to read your files, query your database, call your APIs. That is powerful, but out of the box there is a catch: **any client that connects can call any tool, with any input, as often as it likes.** No login, no limits, no record of what happened.
+
+**mcpx is the checkpoint you put in front of them** — think of it as a bouncer with a guest list, standing between your AI assistants and your tools:
+
+- ✅ **Checks ID** — only clients with a valid token or key get in *(auth)*
+- 🚫 **Blocks the dangerous stuff** — you decide which tools each client may call, and with what arguments *(policy)*
+- ⏱️ **Stops abuse** — caps how many calls come through per second *(rate limiting)*
+- 📝 **Keeps a logbook** — records who called what, when, and whether it was allowed *(audit, metrics, tracing)*
+- 🕵️ **Catches tampering** — flags when a server secretly rewrites a tool you already trusted *(integrity pinning)*
+
+It is **one small binary and one YAML file** — no Kubernetes, no Docker Desktop, no gateway cluster. You point your AI clients at mcpx instead of directly at your servers, and your servers do not change at all.
+
+**Who is it for?** Developers and teams running MCP servers behind Claude, Cursor, VS Code, or custom agents who want a lock on the door before going to production.
 
 ```
 MCP Client (Claude, Cursor, etc.)
       │
       ▼
   ┌────────┐
-  │  mcpx  │  auth · rate limit · policy · audit · metrics · tool integrity
+  │  mcpx  │  auth · rate limit · policy · audit · metrics · tracing · tool integrity
   └────────┘
       │
   ┌───┴────────┐
@@ -146,6 +160,12 @@ rate_limit:
 inspection:
   tool_integrity: enforce   # off | warn | enforce - pin tool schemas, block mutation
   filter_tools_list: true   # hide policy-denied tools from tools/list responses
+
+tracing:
+  enabled: true
+  exporter: otlp            # otlp (OTLP/HTTP, default) | stdout (debug)
+  endpoint: localhost:4318  # OTLP/HTTP collector (required for exporter: otlp)
+  sample_ratio: 1.0         # 0.0-1.0, fraction of requests traced (default 1.0)
 ```
 
 ## Features
@@ -290,6 +310,24 @@ mcpx_breaker_trips_total 1
 mcpx_breaker_state{server="database"} 1
 ```
 
+### 🔭 Distributed Tracing (OpenTelemetry)
+
+Emit one OpenTelemetry span per request, exported over **OTLP/HTTP** to Jaeger, Tempo, Grafana, or any OTLP collector. Each request produces a root `mcpx.request` span with child spans for policy evaluation (`mcpx.policy`) and the backend call (`mcpx.proxy`), tagged with the server, MCP method, tool, client, and allow/deny decision. Inbound W3C `traceparent` headers are honored and trace context is propagated to instrumented HTTP backends, so a single trace spans the caller, the gateway, and the upstream server.
+
+```yaml
+tracing:
+  enabled: true
+  exporter: otlp            # otlp (OTLP/HTTP, default) | stdout (debug)
+  endpoint: localhost:4318  # OTLP/HTTP collector
+  service_name: mcpx        # optional (default "mcpx")
+  sample_ratio: 1.0         # optional, 0.0-1.0 (default 1.0)
+  insecure: true            # optional, plain HTTP; set false for TLS
+  headers:                  # optional, e.g. auth for a hosted collector
+    authorization: "Bearer ..."
+```
+
+Tracing is strictly opt-in: when disabled (the default) it is a no-op with negligible overhead, and no exporter connection is made. It uses the OTLP/HTTP exporter (not gRPC) to keep the binary lean. Settings are read once at startup, so changing them needs a restart.
+
 ### 🏥 Deep Health Checks
 
 `/health` probes each backend server and reports individual status, latency, and policy configuration. Returns `degraded` when some backends are down, `unhealthy` when all are down.
@@ -344,6 +382,7 @@ internal/
 ├── httperr/httperr.go         Consistent JSON error envelopes
 ├── middleware/requestid.go    X-Request-ID propagation
 ├── metrics/metrics.go         Prometheus-compatible metrics (no deps)
+├── tracing/tracing.go         OpenTelemetry OTLP tracing + root-span middleware
 ├── health/health.go           Deep health checking with backend probes
 └── cors/cors.go               CORS middleware for browser clients
 ```
@@ -367,8 +406,8 @@ See [ROADMAP.md](ROADMAP.md) for the full plan. Key upcoming work:
 - [x] Argument-level and per-client policies
 - [x] Per-backend circuit breaker
 - [x] Stdio transport (spawn local MCP servers)
+- [x] OpenTelemetry tracing (OTLP/HTTP spans, W3C context propagation)
 - [ ] WebSocket transport proxying
-- [ ] OpenTelemetry tracing
 - [ ] Web dashboard
 - [ ] Plugin system (Go + WASM)
 - [ ] Helm chart
