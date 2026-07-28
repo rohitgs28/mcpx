@@ -25,6 +25,10 @@ import (
 	"github.com/rohitgs28/mcpx/internal/metrics"
 	"github.com/rohitgs28/mcpx/internal/policy"
 	"github.com/rohitgs28/mcpx/internal/stdio"
+	"github.com/rohitgs28/mcpx/internal/tracing"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Gateway struct {
@@ -98,15 +102,17 @@ func New(cfg *config.Config, pe *policy.Engine, al *audit.Logger, ts *integrity.
 				g.recordBackendFailure(serverName)
 				httperr.Write(w, http.StatusBadGateway, httperr.CodeUpstreamError, "upstream error: "+err.Error())
 			}
-			if g.inspect {
-				// Force identity encoding so ModifyResponse sees plain JSON,
-				// then inspect tools/list responses. tools/list is also pinned
-				// to a JSON response: a Streamable HTTP backend may otherwise
-				// answer over SSE, which would bypass integrity pinning and
-				// list filtering.
-				orig := p.Director
-				p.Director = func(req *http.Request) {
-					orig(req)
+			// Wrap the director unconditionally so trace context is injected
+			// into every outbound request (instrumented backends continue the
+			// trace). When inspection is on we also force identity encoding so
+			// ModifyResponse sees plain JSON and pin tools/list to a JSON
+			// response: a Streamable HTTP backend may otherwise answer over
+			// SSE, which would bypass integrity pinning and list filtering.
+			orig := p.Director
+			p.Director = func(req *http.Request) {
+				orig(req)
+				tracing.InjectHeaders(req.Context(), req.Header)
+				if g.inspect {
 					req.Header.Del("Accept-Encoding")
 					if info, _ := req.Context().Value(ctxKeyReqInfo).(*reqInfo); info != nil && info.method == mcp.MethodToolsList {
 						req.Header.Set("Accept", "application/json")
@@ -205,8 +211,12 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 		if tc, _ := mcp.ParseToolCall(mreq); tc != nil {
 			entry.Tool = tc.Name
 		}
+		tracing.Annotate(r.Context(), sn, entry.Method, entry.Tool, client)
+		_, polSpan := tracing.Tracer().Start(r.Context(), "mcpx.policy")
 		result := g.policy.Evaluate(sn, client, mreq)
+		polSpan.End()
 		if !result.Allowed {
+			tracing.MarkDenied(r.Context(), result.Reason)
 			entry.Allowed = false
 			entry.Reason = result.Reason
 			entry.StatusCode = http.StatusForbidden
@@ -254,12 +264,20 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 	if len(parts) > 1 {
 		r.URL.Path = "/" + parts[1]
 	}
+	// Span the backend call; its context is threaded into the outbound request
+	// so the injected trace context (and any instrumented backend's span)
+	// parents on mcpx.proxy rather than the root request span.
+	ctx, proxySpan := tracing.Tracer().Start(r.Context(), "mcpx.proxy",
+		trace.WithAttributes(attribute.String("mcpx.transport", b.Config.Transport)))
+	r = r.WithContext(ctx)
 	// Clients that accept SSE may receive a long-lived stream, which must
 	// outlive the server's global WriteTimeout.
 	if strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+		tracing.MarkStreaming(ctx)
 		_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	}
 	b.Proxy.ServeHTTP(w, r)
+	proxySpan.End()
 	entry.DurationMs = time.Since(start).Milliseconds()
 	entry.StatusCode = http.StatusOK
 	g.audit.Log(entry)
@@ -297,7 +315,10 @@ func (g *Gateway) serveStdio(w http.ResponseWriter, r *http.Request, b *Backend,
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
+	_, proxySpan := tracing.Tracer().Start(r.Context(), "mcpx.proxy",
+		trace.WithAttributes(attribute.String("mcpx.transport", "stdio")))
 	respBody, err := b.Stdio.Call(r.Context(), body)
+	proxySpan.End()
 	if err != nil {
 		g.recordBackendFailure(b.Name)
 		finish(http.StatusBadGateway)

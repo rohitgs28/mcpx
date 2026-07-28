@@ -40,6 +40,7 @@ import (
 	"github.com/rohitgs28/mcpx/internal/proxy"
 	"github.com/rohitgs28/mcpx/internal/ratelimit"
 	"github.com/rohitgs28/mcpx/internal/stdio"
+	"github.com/rohitgs28/mcpx/internal/tracing"
 )
 
 const version = "0.1.0"
@@ -64,6 +65,15 @@ func main() {
 		slog.Error("failed to load config", "path", *configPath, "error", err)
 		os.Exit(1)
 	}
+
+	// Tracing is configured once at startup (the exporter connection persists
+	// across reloads). On error we log and continue without tracing rather than
+	// fail the gateway over telemetry; Init returns a no-op shutdown in that case.
+	traceShutdown, err := tracing.Init(cfg.Tracing, version)
+	if err != nil {
+		slog.Error("failed to initialize tracing, continuing without it", "error", err)
+	}
+	initialTracing := cfg.Tracing != nil && cfg.Tracing.Enabled
 
 	// Metrics collector persists across reloads so counters are not reset.
 	mc := metrics.New()
@@ -123,6 +133,10 @@ func main() {
 		if newCfg.Listen != initialListen {
 			slog.Warn("listen address change requires restart; ignoring",
 				"current", initialListen, "new", newCfg.Listen)
+		}
+		if newTracing := newCfg.Tracing != nil && newCfg.Tracing.Enabled; newTracing != initialTracing {
+			slog.Warn("tracing enable/disable requires restart; ignoring",
+				"current", initialTracing, "new", newTracing)
 		}
 		h, newAudit := buildHandler(newCfg, mc, ts, bm, sm)
 		reloadable.swap(h)
@@ -219,6 +233,11 @@ func main() {
 
 	sm.CloseAll()
 
+	// Flush any buffered spans before exit (no-op when tracing is disabled).
+	if err := traceShutdown(ctx); err != nil {
+		slog.Warn("failed to flush traces", "error", err)
+	}
+
 	auditMu.Lock()
 	if currentAudit != nil {
 		if err := currentAudit.Close(); err != nil {
@@ -300,6 +319,12 @@ func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store
 
 	if cfg.Auth != nil && cfg.Auth.Enabled {
 		handler = auth.Middleware(*cfg.Auth)(handler)
+	}
+
+	// Tracing wraps just outside auth so the root span covers auth, rate
+	// limiting, and the gateway. No-op when tracing is disabled.
+	if cfg.Tracing != nil && cfg.Tracing.Enabled {
+		handler = tracing.Middleware(handler)
 	}
 
 	handler = metricsMiddleware(mc, handler)

@@ -408,6 +408,111 @@ circuit_breaker:
 	}
 }
 
+func TestValidateTracing(t *testing.T) {
+	valid := `
+servers:
+  - name: test
+    url: http://localhost:3001
+tracing:
+  enabled: true
+  exporter: otlp
+  endpoint: localhost:4318
+  service_name: gw
+  sample_ratio: 0.5
+`
+	cfg, err := loadFromStringErr(valid)
+	if err != nil {
+		t.Fatalf("valid tracing rejected: %v", err)
+	}
+	if cfg.Tracing == nil || !cfg.Tracing.Enabled {
+		t.Fatal("expected tracing enabled")
+	}
+	if cfg.Tracing.SampleRatio == nil || *cfg.Tracing.SampleRatio != 0.5 {
+		t.Errorf("sample_ratio = %v, want 0.5", cfg.Tracing.SampleRatio)
+	}
+
+	cases := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "otlp without endpoint",
+			yaml: `
+servers:
+  - name: test
+    url: http://localhost:3001
+tracing:
+  enabled: true
+  exporter: otlp
+`,
+			wantErr: "tracing.endpoint is required",
+		},
+		{
+			name: "unknown exporter",
+			yaml: `
+servers:
+  - name: test
+    url: http://localhost:3001
+tracing:
+  enabled: true
+  exporter: jaeger
+  endpoint: localhost:4318
+`,
+			wantErr: "tracing.exporter must be",
+		},
+		{
+			name: "sample_ratio out of range",
+			yaml: `
+servers:
+  - name: test
+    url: http://localhost:3001
+tracing:
+  enabled: true
+  exporter: stdout
+  sample_ratio: 1.5
+`,
+			wantErr: "tracing.sample_ratio must be between",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadFromStringErr(tc.yaml)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %q, want substring %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+
+	// A disabled tracing block with no endpoint must not error.
+	disabled := `
+servers:
+  - name: test
+    url: http://localhost:3001
+tracing:
+  enabled: false
+`
+	if _, err := loadFromStringErr(disabled); err != nil {
+		t.Errorf("disabled tracing should be valid, got %v", err)
+	}
+
+	// stdout exporter needs no endpoint.
+	stdoutOK := `
+servers:
+  - name: test
+    url: http://localhost:3001
+tracing:
+  enabled: true
+  exporter: stdout
+`
+	if _, err := loadFromStringErr(stdoutOK); err != nil {
+		t.Errorf("stdout exporter without endpoint should be valid, got %v", err)
+	}
+}
+
 func TestValidateRateLimitRPS(t *testing.T) {
 	yaml := `
 servers:
