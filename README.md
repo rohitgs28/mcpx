@@ -166,6 +166,11 @@ tracing:
   exporter: otlp            # otlp (OTLP/HTTP, default) | stdout (debug)
   endpoint: localhost:4318  # OTLP/HTTP collector (required for exporter: otlp)
   sample_ratio: 1.0         # 0.0-1.0, fraction of requests traced (default 1.0)
+
+cache:
+  enabled: true             # per-tool opt-in under servers[].cache.tools
+  max_entries: 1000
+  default_ttl: 60s
 ```
 
 ## Features
@@ -276,6 +281,43 @@ circuit_breaker:
   half_open_max: 1
 ```
 
+### 💾 Response Caching
+
+Repeat calls to expensive, idempotent tools can be served from memory instead of the backend. Caching is **deny-by-default**: enabling the section caches nothing until you name a tool.
+
+```yaml
+cache:
+  enabled: true
+  max_entries: 1000        # bounded LRU
+  default_ttl: 60s         # used by tools with no ttl of their own
+  max_body_bytes: 262144   # 256 KiB; larger responses pass through uncached
+  purge_on_reload: false   # true empties the cache on every config reload
+
+servers:
+  - name: docs
+    url: http://localhost:3004
+    cache:
+      tools:
+        search_docs: { ttl: 5m }
+        get_page: {}         # inherits default_ttl
+```
+
+Every response carries `X-Mcpx-Cache: hit|miss`, and hits also carry an `Age` header. Cached entries survive config hot-reloads, and `mcpx_cache_lookups_total` breaks hits and misses down per server and tool.
+
+**What is never cached** - the cache is designed so a wrong answer is impossible rather than unlikely:
+
+- **Anything a client is not allowed to call.** Policy is evaluated *before* the cache, so a newly-denied tool can never be answered from a warm entry.
+- **Failures.** JSON-RPC errors, MCP results with `isError: true`, and non-`200` responses are skipped - a transient blip must not be pinned for the whole TTL.
+- **Streams.** An SSE or event-stream response passes straight through to the client, unbuffered.
+- **Oversized bodies.** Responses past `max_body_bytes` are streamed through, so one huge result cannot evict the whole cache.
+- **Tools you didn't name.** No wildcards, no heuristics about which tools "look" read-only.
+
+Entries are keyed by **server + tool + client identity + canonical arguments**, so two clients with different per-client policies never share one, and argument key order doesn't split entries. Cached bodies are re-pointed at the current request's JSON-RPC `id` before being served, so a client always sees a reply to the request it actually sent.
+
+Concurrent identical misses are collapsed by **single-flight**: the first caller fetches, the rest wait and share its result rather than stampeding the backend. A waiter whose client disconnects stops waiting instead of outliving its request.
+
+Because a hit costs the backend nothing, the cache sits *in front of* the circuit breaker: cached tools keep answering while a backend is down.
+
 ### 🔎 Tool Integrity Pinning
 
 mcpx hashes the **full schema** of every tool (name, description, and input schema) the first time a backend advertises it, then flags any later change. This deterministically detects **rug-pull tool mutation** ([CVE-2025-54136](https://nvd.nist.gov/vuln/detail/CVE-2025-54136)), cross-server shadowing, and full-schema poisoning - attacks where a server silently rewrites a tool the client already approved.
@@ -308,6 +350,8 @@ mcpx_auth_failures_total 3
 mcpx_rate_limit_hits_total 1
 mcpx_breaker_trips_total 1
 mcpx_breaker_state{server="database"} 1
+mcpx_cache_lookups_total{server="docs",tool="search_docs",result="hit"} 17
+mcpx_cache_entries 24
 ```
 
 ### 🔭 Distributed Tracing (OpenTelemetry)
@@ -379,6 +423,7 @@ internal/
 ├── policy/policy.go           Tool/argument/client policy engine
 ├── integrity/integrity.go     Full-schema tool pinning (rug-pull detection)
 ├── breaker/breaker.go         Per-backend circuit breaker
+├── cache/cache.go             Response cache: bounded LRU + TTL + single-flight
 ├── httperr/httperr.go         Consistent JSON error envelopes
 ├── middleware/requestid.go    X-Request-ID propagation
 ├── metrics/metrics.go         Prometheus-compatible metrics (no deps)
@@ -387,7 +432,7 @@ internal/
 └── cors/cors.go               CORS middleware for browser clients
 ```
 
-**Middleware chain:** CORS → Metrics → Auth → Rate Limit → Gateway (Policy → Audit → Proxy)
+**Middleware chain:** CORS → Metrics → Auth → Rate Limit → Gateway (Policy → Cache → Breaker → Proxy → Audit)
 
 Every request is inspected at the MCP protocol level. The gateway parses JSON-RPC messages to extract the method and tool name, evaluates the policy before forwarding, and inspects `tools/list` responses for schema integrity and policy filtering on the way back.
 
@@ -407,6 +452,7 @@ See [ROADMAP.md](ROADMAP.md) for the full plan. Key upcoming work:
 - [x] Per-backend circuit breaker
 - [x] Stdio transport (spawn local MCP servers)
 - [x] OpenTelemetry tracing (OTLP/HTTP spans, W3C context propagation)
+- [x] Response caching for idempotent tools (LRU + TTL + single-flight)
 - [ ] WebSocket transport proxying
 - [ ] Web dashboard
 - [ ] Plugin system (Go + WASM)

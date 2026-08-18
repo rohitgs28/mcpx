@@ -59,7 +59,7 @@ Make mcpx the simplest, fastest way to secure MCP servers in production. One bin
 - [x] Hot config reload (SIGHUP or watch mode)
 - [x] Graceful shutdown with connection draining
 - [x] Circuit breaker per backend
-- [ ] Request/response caching for idempotent tools
+- [x] Request/response caching for idempotent tools (bounded LRU + TTL, per-tool opt-in, single-flight)
 - [ ] Admin API for runtime config changes
 
 ## Phase 6: Ecosystem

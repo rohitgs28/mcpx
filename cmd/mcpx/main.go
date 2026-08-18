@@ -29,6 +29,7 @@ import (
 	"github.com/rohitgs28/mcpx/internal/audit"
 	"github.com/rohitgs28/mcpx/internal/auth"
 	"github.com/rohitgs28/mcpx/internal/breaker"
+	"github.com/rohitgs28/mcpx/internal/cache"
 	"github.com/rohitgs28/mcpx/internal/config"
 	"github.com/rohitgs28/mcpx/internal/cors"
 	"github.com/rohitgs28/mcpx/internal/health"
@@ -98,6 +99,19 @@ func main() {
 		}, true)
 	}
 
+	// The response cache persists across reloads too, so a reload does not
+	// throw away a warm cache. Its sizing is read once at startup; which tools
+	// are cacheable comes from the per-server config and does reload. Set
+	// cache.purge_on_reload to empty it on every reload instead.
+	var cs *cache.Store
+	if cc := cfg.Cache; cc != nil && cc.Enabled {
+		cs = cache.New(cache.Config{
+			MaxEntries:   cc.MaxEntries,
+			DefaultTTL:   time.Duration(cc.DefaultTTL),
+			MaxBodyBytes: cc.MaxBodyBytes,
+		}, true)
+	}
+
 	// Stdio child processes also persist across reloads: a SIGHUP that
 	// leaves a server's spawn config untouched keeps its process (and the
 	// MCP sessions on it) running.
@@ -106,7 +120,7 @@ func main() {
 	// Build the initial handler and wrap it in a reloadable shell.
 	// On reload, we atomically swap the inner handler — new requests see
 	// the new config, in-flight requests finish against the old one.
-	initialHandler, initialAudit := buildHandler(cfg, mc, ts, bm, sm)
+	initialHandler, initialAudit := buildHandler(cfg, mc, ts, bm, sm, cs)
 	reloadable := newReloadableHandler(initialHandler)
 
 	// currentAudit tracks the live audit logger so its file handle can be
@@ -138,7 +152,14 @@ func main() {
 			slog.Warn("tracing enable/disable requires restart; ignoring",
 				"current", initialTracing, "new", newTracing)
 		}
-		h, newAudit := buildHandler(newCfg, mc, ts, bm, sm)
+		if newCache := newCfg.Cache != nil && newCfg.Cache.Enabled; newCache != cs.Enabled() {
+			slog.Warn("cache enable/disable requires restart; ignoring",
+				"current", cs.Enabled(), "new", newCache)
+		}
+		if newCfg.Cache != nil && newCfg.Cache.PurgeOnReload {
+			cs.Purge()
+		}
+		h, newAudit := buildHandler(newCfg, mc, ts, bm, sm, cs)
 		reloadable.swap(h)
 		// Stop child processes for stdio servers dropped from the config.
 		active := make(map[string]bool)
@@ -256,7 +277,7 @@ func main() {
 // The metrics collector is passed in so that counters survive reloads.
 // The returned audit logger is owned by the caller, which must Close it
 // when the handler is retired (reload swap or shutdown).
-func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store, bm *breaker.Manager, sm *stdio.Manager) (http.Handler, *audit.Logger) {
+func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store, bm *breaker.Manager, sm *stdio.Manager, cs *cache.Store) (http.Handler, *audit.Logger) {
 	mc.SetServersRegistered(int64(len(cfg.Servers)))
 
 	// Build health checker with server info
@@ -298,7 +319,7 @@ func buildHandler(cfg *config.Config, mc *metrics.Collector, ts *integrity.Store
 		al, _ = audit.New(config.AuditConfig{})
 	}
 
-	gw, err := proxy.New(cfg, pe, al, ts, bm, sm, mc)
+	gw, err := proxy.New(cfg, pe, al, ts, bm, sm, mc, cs)
 	if err != nil {
 		slog.Error("failed to build gateway, serving 503 on /mcp/", "error", err)
 	}

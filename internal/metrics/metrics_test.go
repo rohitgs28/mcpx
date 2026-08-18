@@ -43,6 +43,29 @@ func TestRecordToolCall(t *testing.T) {
 	}
 }
 
+func TestCacheMetrics(t *testing.T) {
+	c := New()
+	c.RecordCacheLookup("docs", "search", "miss")
+	c.RecordCacheLookup("docs", "search", "hit")
+	c.RecordCacheLookup("docs", "search", "hit")
+	c.SetCacheStats(42, 7)
+
+	body := getMetrics(t, c)
+
+	if !strings.Contains(body, `mcpx_cache_lookups_total{server="docs",tool="search",result="hit"} 2`) {
+		t.Error("expected 2 cache hits for docs/search")
+	}
+	if !strings.Contains(body, `mcpx_cache_lookups_total{server="docs",tool="search",result="miss"} 1`) {
+		t.Error("expected 1 cache miss for docs/search")
+	}
+	if !strings.Contains(body, "mcpx_cache_entries 42") {
+		t.Error("expected cache entries gauge of 42")
+	}
+	if !strings.Contains(body, "mcpx_cache_evictions_total 7") {
+		t.Error("expected cache eviction counter of 7")
+	}
+}
+
 func TestAuthAndRateLimitCounters(t *testing.T) {
 	c := New()
 	c.RecordAuthFailure()

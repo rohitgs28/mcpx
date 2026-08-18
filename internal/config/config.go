@@ -47,6 +47,46 @@ type Config struct {
 	// breaker, its settings are read once at startup (the exporter connection
 	// persists across reloads), so changing them needs a restart.
 	Tracing *TracingConfig `yaml:"tracing"`
+	// Cache configures response caching for idempotent tools. Store sizing is
+	// read once at startup (cached entries survive reloads); which tools are
+	// cacheable is per-server and does reload. Enabling it globally caches
+	// nothing on its own: every cached tool is opted in under servers[].cache.
+	Cache *CacheConfig `yaml:"cache"`
+}
+
+// CacheConfig sizes the shared response cache. Zero values take defaults
+// (max_entries 1000, default_ttl 60s, max_body_bytes 262144).
+type CacheConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// MaxEntries bounds the LRU; the least recently used entry is evicted
+	// past this point.
+	MaxEntries int `yaml:"max_entries"`
+	// DefaultTTL applies to cached tools that do not set their own ttl.
+	DefaultTTL Duration `yaml:"default_ttl"`
+	// MaxBodyBytes skips caching responses larger than this, so one huge
+	// result cannot push everything else out of a bounded cache.
+	MaxBodyBytes int `yaml:"max_body_bytes"`
+	// PurgeOnReload empties the cache on every config reload. Off by default:
+	// entries are keyed by server, tool, client, and arguments, so a reload
+	// that changes policy cannot serve a newly-denied call (policy is
+	// evaluated before the cache is consulted). Turn it on when backends
+	// change behaviour under the same tool name.
+	PurgeOnReload bool `yaml:"purge_on_reload"`
+}
+
+// ServerCacheConfig opts individual tools on one server into response caching.
+// Caching is deny-by-default: a tool absent from Tools is never cached.
+type ServerCacheConfig struct {
+	// Tools maps tool name to its cache rule. An empty rule uses the global
+	// default_ttl.
+	Tools map[string]CacheRule `yaml:"tools"`
+}
+
+// CacheRule is the per-tool cache policy.
+type CacheRule struct {
+	// TTL is how long a response for this tool stays fresh (default: the
+	// global cache.default_ttl).
+	TTL Duration `yaml:"ttl"`
 }
 
 // TracingConfig configures OpenTelemetry (OTLP) distributed tracing. When
@@ -118,6 +158,9 @@ type ServerConfig struct {
 	WorkDir        string            `yaml:"workdir"`         // stdio only: working directory for the child
 	RequestTimeout Duration          `yaml:"request_timeout"` // stdio only: per-request reply deadline (default 30s)
 	Policy         *Policy           `yaml:"policy"`
+	// Cache names the tools on this server whose responses may be cached.
+	// Ignored unless the top-level cache section is enabled.
+	Cache *ServerCacheConfig `yaml:"cache"`
 }
 
 // Policy defines tool-level access control for a server.
@@ -278,6 +321,16 @@ func (c *Config) Validate() error {
 		if err := validatePolicy(srv.Policy, fmt.Sprintf("server %q", srv.Name)); err != nil {
 			return err
 		}
+		if srv.Cache != nil {
+			for tool, rule := range srv.Cache.Tools {
+				if tool == "" {
+					return fmt.Errorf("server %q: cache.tools: tool name must not be empty", srv.Name)
+				}
+				if rule.TTL < 0 {
+					return fmt.Errorf("server %q: cache.tools.%s.ttl must not be negative", srv.Name, tool)
+				}
+			}
+		}
 	}
 
 	if c.Auth != nil && c.Auth.Enabled {
@@ -358,6 +411,18 @@ func (c *Config) Validate() error {
 		}
 		if tr.SampleRatio != nil && (*tr.SampleRatio < 0 || *tr.SampleRatio > 1) {
 			return fmt.Errorf("tracing.sample_ratio must be between 0.0 and 1.0 (got %v)", *tr.SampleRatio)
+		}
+	}
+
+	if ca := c.Cache; ca != nil && ca.Enabled {
+		if ca.MaxEntries < 0 {
+			return fmt.Errorf("cache.max_entries must not be negative (got %d)", ca.MaxEntries)
+		}
+		if ca.DefaultTTL < 0 {
+			return fmt.Errorf("cache.default_ttl must not be negative")
+		}
+		if ca.MaxBodyBytes < 0 {
+			return fmt.Errorf("cache.max_body_bytes must not be negative (got %d)", ca.MaxBodyBytes)
 		}
 	}
 

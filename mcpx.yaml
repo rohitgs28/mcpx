@@ -33,6 +33,12 @@ servers:
     policy:
       # Read-only mode: tools/list works, tools/call is blocked
       read_only: true
+    # Response caching is opt-in per tool: name only tools that are
+    # idempotent and safe to replay. Omit ttl to use cache.default_ttl.
+    cache:
+      tools:
+        list_tables: { ttl: 5m }
+        describe_table: {}
 
   - name: github
     url: http://localhost:3003
@@ -123,3 +129,18 @@ circuit_breaker:
   failure_threshold: 5   # consecutive failures (5xx or transport errors) that open the circuit
   cooldown: 30s          # how long to stay open before probing recovery
   half_open_max: 1       # concurrent probe requests while half-open
+
+# Response cache: serve repeat calls to idempotent tools from memory instead
+# of the backend. Nothing is cached until a tool is named under a server's
+# cache.tools (above) — enabling this section alone caches nothing.
+#
+# Entries are keyed by server + tool + client identity + arguments, so two
+# clients never share one. Errors, tool results with isError, streamed
+# responses, and bodies over max_body_bytes are never stored. Concurrent
+# identical misses are collapsed into a single backend call.
+cache:
+  enabled: true
+  max_entries: 1000        # bounded LRU; the least recently used entry is evicted
+  default_ttl: 60s         # applies to cached tools that set no ttl of their own
+  max_body_bytes: 262144   # 256 KiB; larger responses are passed through uncached
+  purge_on_reload: false   # true empties the cache on every config reload

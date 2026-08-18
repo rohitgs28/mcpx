@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Response caching for idempotent tools (`cache` section). A bounded in-memory
+  LRU with per-tool TTLs serves repeat `tools/call` requests without touching
+  the backend. Caching is opt-in per tool under `servers[].cache.tools`; entries
+  are keyed by server, tool, client identity, and canonical arguments, so
+  clients never share one. Errors, `isError` results, streamed responses, and
+  bodies over `max_body_bytes` are never stored, and the cache is consulted only
+  after policy evaluation. Concurrent identical misses are collapsed into a
+  single backend call (single-flight). Responses carry `X-Mcpx-Cache: hit|miss`,
+  hits carry `Age`, and `mcpx_cache_lookups_total` / `mcpx_cache_entries` /
+  `mcpx_cache_evictions_total` are exported at `/metrics`.
+
 ## [0.1.0] - 2026-06-21
 
 First public release. mcpx is a lightweight gateway proxy that sits between MCP
