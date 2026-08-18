@@ -27,6 +27,7 @@ type Entry struct {
 	ClientIP   string    `json:"client_ip,omitempty"`
 	Allowed    bool      `json:"allowed"`
 	Reason     string    `json:"reason,omitempty"`
+	Cache      string    `json:"cache,omitempty"` // response cache outcome: "hit" or "miss"
 	DurationMs int64     `json:"duration_ms,omitempty"`
 	StatusCode int       `json:"status_code,omitempty"`
 }
@@ -79,6 +80,9 @@ func (l *Logger) Log(entry Entry) {
 	}
 	if entry.Reason != "" {
 		a = append(a, "reason", entry.Reason)
+	}
+	if entry.Cache != "" {
+		a = append(a, "cache", entry.Cache)
 	}
 	if entry.DurationMs > 0 {
 		a = append(a, "duration_ms", entry.DurationMs)

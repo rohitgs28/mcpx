@@ -18,6 +18,7 @@ import (
 	"github.com/rohitgs28/mcpx/internal/audit"
 	"github.com/rohitgs28/mcpx/internal/auth"
 	"github.com/rohitgs28/mcpx/internal/breaker"
+	"github.com/rohitgs28/mcpx/internal/cache"
 	"github.com/rohitgs28/mcpx/internal/config"
 	"github.com/rohitgs28/mcpx/internal/httperr"
 	"github.com/rohitgs28/mcpx/internal/integrity"
@@ -38,6 +39,8 @@ type Gateway struct {
 	tools    *integrity.Store
 	metrics  *metrics.Collector
 	breakers *breaker.Manager // may be nil/disabled: Get returns nil breakers
+	cache    *cache.Store     // may be nil/disabled: every method is a no-op
+	rules    cacheRules       // per-server, per-tool cache TTLs (empty when caching is off)
 	filter   bool             // remove policy-denied tools from tools/list responses
 	inspect  bool             // true when integrity or filtering needs response interception
 	mux      *http.ServeMux
@@ -69,9 +72,10 @@ type reqInfo struct {
 // per-request decisions; the integrity store (may be nil) pins tool schemas;
 // the breaker manager (may be nil) fails fast on repeatedly-failing backends;
 // the stdio manager (required only when a stdio server is configured) owns
-// local child processes. Tool-list filtering is enabled via
+// local child processes; the response cache (may be nil) serves repeat calls
+// to idempotent tools. Tool-list filtering is enabled via
 // cfg.Inspection.FilterToolsList.
-func New(cfg *config.Config, pe *policy.Engine, al *audit.Logger, ts *integrity.Store, bm *breaker.Manager, sm *stdio.Manager, mc *metrics.Collector) (*Gateway, error) {
+func New(cfg *config.Config, pe *policy.Engine, al *audit.Logger, ts *integrity.Store, bm *breaker.Manager, sm *stdio.Manager, mc *metrics.Collector, cs *cache.Store) (*Gateway, error) {
 	g := &Gateway{
 		servers:  make(map[string]*Backend),
 		policy:   pe,
@@ -79,10 +83,14 @@ func New(cfg *config.Config, pe *policy.Engine, al *audit.Logger, ts *integrity.
 		tools:    ts,
 		metrics:  mc,
 		breakers: bm,
+		cache:    cs,
 		mux:      http.NewServeMux(),
 	}
 	if cfg.Inspection != nil {
 		g.filter = cfg.Inspection.FilterToolsList
+	}
+	if cs.Enabled() {
+		g.rules = buildCacheRules(cfg.Servers, cs.DefaultTTL())
 	}
 	g.inspect = g.filter || (ts != nil && ts.Enabled())
 
@@ -206,9 +214,11 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 	mreq, _ := mcp.ParseRequest(body)
 	client := auth.ClientFrom(r.Context())
 	entry := audit.Entry{Timestamp: time.Now().UTC(), Server: sn, Client: client, ClientIP: r.RemoteAddr}
+	var toolCall *mcp.ToolCallParams
 	if mreq != nil {
 		entry.Method = mreq.Method
 		if tc, _ := mcp.ParseToolCall(mreq); tc != nil {
+			toolCall = tc
 			entry.Tool = tc.Name
 		}
 		tracing.Annotate(r.Context(), sn, entry.Method, entry.Tool, client)
@@ -227,6 +237,27 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		g.recordToolCall(sn, entry.Tool, "allow", client)
+	}
+	// Response cache. Consulted after policy (so a denied call is never
+	// answered from a warm entry) but before the circuit breaker: a hit costs
+	// the backend nothing, so it is worth serving even while the circuit is
+	// open. A miss returns an op the backend call below fills in.
+	hit, cop := g.beginCache(r.Context(), sn, client, mreq, toolCall)
+	if hit != nil {
+		entry.Allowed = true
+		entry.Cache = "hit"
+		entry.StatusCode = g.serveCacheHit(w, hit, body)
+		entry.DurationMs = time.Since(start).Milliseconds()
+		g.audit.Log(entry)
+		return
+	}
+	if cop != nil {
+		entry.Cache = "miss"
+		if cop.lead {
+			// Release exactly once, whatever happens below: a follower blocked
+			// on this key must never be stranded by an early return or panic.
+			defer func() { g.cache.Release(cop.key, cop.stored) }()
+		}
 	}
 	// Fail fast while the backend's circuit is open instead of queueing
 	// requests against a dead upstream.
@@ -247,7 +278,7 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 	// Stdio backends bypass the reverse proxy entirely: the request is
 	// bridged onto the child process and the reply written directly.
 	if b.Stdio != nil {
-		g.serveStdio(w, r, b, mreq, body, entry, start)
+		g.serveStdio(w, r, b, mreq, body, entry, start, cop)
 		return
 	}
 	// Thread routing details to ModifyResponse: tools/list inspection needs
@@ -276,7 +307,20 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 		tracing.MarkStreaming(ctx)
 		_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	}
-	b.Proxy.ServeHTTP(w, r)
+	// For a cacheable tool the leader buffers the response so it can be stored;
+	// captureWriter falls back to streaming the moment the response turns out
+	// not to be a bounded JSON reply.
+	if cop != nil {
+		w.Header().Set(CacheHeader, "miss")
+	}
+	if cop != nil && cop.lead {
+		cw := newCaptureWriter(w, g.cache.MaxBodyBytes())
+		b.Proxy.ServeHTTP(cw, r)
+		cop.stored = g.storeCacheable(cop, cw.status, cw.Header().Get("Content-Type"), cw.body())
+		cw.finish()
+	} else {
+		b.Proxy.ServeHTTP(w, r)
+	}
 	proxySpan.End()
 	entry.DurationMs = time.Since(start).Milliseconds()
 	entry.StatusCode = http.StatusOK
@@ -287,7 +331,7 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 // limiting, policy, and the circuit breaker have already run by the time we
 // get here; this handles transport translation, feeds the breaker, and
 // applies the same tools/list inspection the reverse proxy path gets.
-func (g *Gateway) serveStdio(w http.ResponseWriter, r *http.Request, b *Backend, mreq *mcp.Request, body []byte, entry audit.Entry, start time.Time) {
+func (g *Gateway) serveStdio(w http.ResponseWriter, r *http.Request, b *Backend, mreq *mcp.Request, body []byte, entry audit.Entry, start time.Time, cop *cacheOp) {
 	finish := func(status int) {
 		entry.StatusCode = status
 		entry.DurationMs = time.Since(start).Milliseconds()
@@ -332,6 +376,12 @@ func (g *Gateway) serveStdio(w http.ResponseWriter, r *http.Request, b *Backend,
 	if g.inspect && mreq.Method == mcp.MethodToolsList {
 		if newBody, changed := g.processToolsList(b.Name, entry.Client, respBody); changed {
 			respBody = newBody
+		}
+	}
+	if cop != nil {
+		w.Header().Set(CacheHeader, "miss")
+		if cop.lead {
+			cop.stored = g.storeCacheable(cop, http.StatusOK, "application/json", respBody)
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")

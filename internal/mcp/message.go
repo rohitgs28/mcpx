@@ -91,6 +91,20 @@ func ParseRequest(data []byte) (*Request, error) {
 	return &req, nil
 }
 
+// RawID returns the id field of a JSON-RPC message as raw bytes, or nil when
+// the message has none (a notification) or does not parse. Unlike Request.ID
+// this preserves the id exactly as sent: decoding into an any would turn a
+// large integer id into a float64 and hand the client back a different value.
+func RawID(data []byte) json.RawMessage {
+	var m struct {
+		ID json.RawMessage `json:"id"`
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil
+	}
+	return m.ID
+}
+
 func ParseToolCall(req *Request) (*ToolCallParams, error) {
 	if req.Method != MethodToolsCall {
 		return nil, nil

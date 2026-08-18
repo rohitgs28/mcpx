@@ -81,7 +81,7 @@ func stdioGateway(t *testing.T, pol *config.Policy, insp *config.InspectionConfi
 	}
 	sm := stdio.NewManager()
 	t.Cleanup(sm.CloseAll)
-	gw, err := proxy.New(cfg, policy.New(cfg.Servers, nil), al, integrity.NewStore(integrity.ModeOff), nil, sm, metrics.New())
+	gw, err := proxy.New(cfg, policy.New(cfg.Servers, nil), al, integrity.NewStore(integrity.ModeOff), nil, sm, metrics.New(), nil)
 	if err != nil {
 		t.Fatalf("proxy.New: %v", err)
 	}

@@ -27,6 +27,9 @@ type Collector struct {
 	rateLimitHits   atomic.Int64
 	breakerTrips    atomic.Int64
 	breakerState    map[string]*atomic.Int64 // label: server; 0 closed, 1 open, 2 half-open
+	cacheLookups    map[string]*atomic.Int64 // label: server,tool,result (hit/miss)
+	cacheEvictions  atomic.Int64
+	cacheEntries    atomic.Int64
 
 	// Histograms (simplified: count + sum for averages, plus buckets)
 	latencySum     map[string]*atomic.Int64            // microseconds, label: server
@@ -49,6 +52,7 @@ func New() *Collector {
 		toolCallsTotal:  make(map[string]*atomic.Int64),
 		policyDecisions: make(map[string]*atomic.Int64),
 		breakerState:    make(map[string]*atomic.Int64),
+		cacheLookups:    make(map[string]*atomic.Int64),
 		latencySum:      make(map[string]*atomic.Int64),
 		latencyCount:    make(map[string]*atomic.Int64),
 		latencyBuckets:  make(map[string]map[string]*atomic.Int64),
@@ -125,6 +129,22 @@ func (c *Collector) RecordBreakerTrip() {
 func (c *Collector) SetBreakerState(server string, state int64) {
 	label := fmt.Sprintf("server=%q", server)
 	c.getOrCreateCounter(c.breakerState, label).Store(state)
+}
+
+// RecordCacheLookup records a response-cache lookup for a tool. result is
+// "hit" or "miss"; cardinality is bounded because only tools explicitly
+// opted into caching are ever looked up.
+func (c *Collector) RecordCacheLookup(server, tool, result string) {
+	label := fmt.Sprintf("server=%q,tool=%q,result=%q", server, tool, result)
+	c.getOrCreateCounter(c.cacheLookups, label).Add(1)
+}
+
+// SetCacheStats records current cache occupancy and the cumulative eviction
+// count. Both are read from the store rather than counted here, so a store
+// shared across reloads reports consistent numbers.
+func (c *Collector) SetCacheStats(entries, evictions int64) {
+	c.cacheEntries.Store(entries)
+	c.cacheEvictions.Store(evictions)
 }
 
 // SetActiveConnections sets the current number of active connections.
@@ -211,6 +231,20 @@ func (c *Collector) Handler() http.HandlerFunc {
 		b.WriteString("# TYPE mcpx_breaker_state gauge\n")
 		c.writeCounterMap(&b, "mcpx_breaker_state", c.breakerState)
 		b.WriteString("\n")
+
+		// Response cache
+		b.WriteString("# HELP mcpx_cache_lookups_total Response-cache lookups by outcome.\n")
+		b.WriteString("# TYPE mcpx_cache_lookups_total counter\n")
+		c.writeCounterMap(&b, "mcpx_cache_lookups_total", c.cacheLookups)
+		b.WriteString("\n")
+
+		b.WriteString("# HELP mcpx_cache_entries Response-cache entries currently held.\n")
+		b.WriteString("# TYPE mcpx_cache_entries gauge\n")
+		fmt.Fprintf(&b, "mcpx_cache_entries %d\n\n", c.cacheEntries.Load())
+
+		b.WriteString("# HELP mcpx_cache_evictions_total Entries evicted from the response cache for capacity.\n")
+		b.WriteString("# TYPE mcpx_cache_evictions_total counter\n")
+		fmt.Fprintf(&b, "mcpx_cache_evictions_total %d\n\n", c.cacheEvictions.Load())
 
 		// Latency histograms
 		b.WriteString("# HELP mcpx_request_duration_ms Request latency in milliseconds.\n")

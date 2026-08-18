@@ -21,7 +21,7 @@ func breakerGateway(t *testing.T, url string, cfg breaker.Config) (*proxy.Gatewa
 	al, _ := audit.New(config.AuditConfig{})
 	mc := metrics.New()
 	bm := breaker.NewManager(cfg, true)
-	gw, err := proxy.New(c, policy.New(c.Servers, nil), al, integrity.NewStore(integrity.ModeOff), bm, nil, mc)
+	gw, err := proxy.New(c, policy.New(c.Servers, nil), al, integrity.NewStore(integrity.ModeOff), bm, nil, mc, nil)
 	if err != nil {
 		t.Fatalf("proxy.New: %v", err)
 	}

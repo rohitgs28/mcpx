@@ -56,7 +56,7 @@ func newGatewayFromConfig(t *testing.T, cfg *config.Config, mode ...integrity.Mo
 	if err != nil {
 		t.Fatalf("audit.New: %v", err)
 	}
-	gw, err := proxy.New(cfg, policy.New(cfg.Servers, cfg.Clients), al, integrity.NewStore(m), nil, stdio.NewManager(), metrics.New())
+	gw, err := proxy.New(cfg, policy.New(cfg.Servers, cfg.Clients), al, integrity.NewStore(m), nil, stdio.NewManager(), metrics.New(), nil)
 	if err != nil {
 		t.Fatalf("proxy.New: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestGateway_RecordsToolCallMetric(t *testing.T) {
 	}
 	al, _ := audit.New(config.AuditConfig{})
 	mc := metrics.New()
-	gw, err := proxy.New(cfg, policy.New(cfg.Servers, cfg.Clients), al, integrity.NewStore(integrity.ModeOff), nil, nil, mc)
+	gw, err := proxy.New(cfg, policy.New(cfg.Servers, cfg.Clients), al, integrity.NewStore(integrity.ModeOff), nil, nil, mc, nil)
 	if err != nil {
 		t.Fatalf("proxy.New: %v", err)
 	}

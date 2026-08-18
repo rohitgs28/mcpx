@@ -408,6 +408,85 @@ circuit_breaker:
 	}
 }
 
+func TestValidateCache(t *testing.T) {
+	valid := `
+servers:
+  - name: test
+    url: http://localhost:3001
+    cache:
+      tools:
+        search_docs:
+          ttl: 5m
+        get_page: {}
+cache:
+  enabled: true
+  max_entries: 500
+  default_ttl: 30s
+  max_body_bytes: 65536
+  purge_on_reload: true
+`
+	cfg, err := loadFromStringErr(valid)
+	if err != nil {
+		t.Fatalf("valid cache config rejected: %v", err)
+	}
+	if !cfg.Cache.Enabled || cfg.Cache.MaxEntries != 500 || cfg.Cache.MaxBodyBytes != 65536 {
+		t.Errorf("cache config not parsed: %+v", cfg.Cache)
+	}
+	if !cfg.Cache.PurgeOnReload {
+		t.Error("purge_on_reload not parsed")
+	}
+	if d := time.Duration(cfg.Cache.DefaultTTL); d != 30*time.Second {
+		t.Errorf("default_ttl = %v, want 30s", d)
+	}
+	tools := cfg.Servers[0].Cache.Tools
+	if len(tools) != 2 {
+		t.Fatalf("expected 2 cached tools, got %d", len(tools))
+	}
+	if d := time.Duration(tools["search_docs"].TTL); d != 5*time.Minute {
+		t.Errorf("search_docs ttl = %v, want 5m", d)
+	}
+	if d := time.Duration(tools["get_page"].TTL); d != 0 {
+		t.Errorf("get_page ttl = %v, want 0 (falls back to default_ttl)", d)
+	}
+
+	invalid := map[string]string{
+		"negative max_entries": `
+servers:
+  - name: test
+    url: http://localhost:3001
+cache:
+  enabled: true
+  max_entries: -1
+`,
+		"negative max_body_bytes": `
+servers:
+  - name: test
+    url: http://localhost:3001
+cache:
+  enabled: true
+  max_body_bytes: -1
+`,
+		"bad ttl duration": `
+servers:
+  - name: test
+    url: http://localhost:3001
+    cache:
+      tools:
+        search_docs:
+          ttl: five minutes
+cache:
+  enabled: true
+`,
+	}
+	for name, yaml := range invalid {
+		t.Run(name, func(t *testing.T) {
+			if _, err := loadFromStringErr(yaml); err == nil {
+				t.Errorf("expected %s to be rejected", name)
+			}
+		})
+	}
+}
+
 func TestValidateTracing(t *testing.T) {
 	valid := `
 servers:
